@@ -282,7 +282,9 @@ fn entity_set_color(engine: &mut Headless, args: SetColorArgs) -> anyhow::Result
     let instance = engine
         .world
         .query_one_mut::<&mut MeshInstance>(entity)
-        .map_err(|_| anyhow::anyhow!("entity {} draws no mesh, so it has no colour", args.entity))?;
+        .map_err(|_| {
+            anyhow::anyhow!("entity {} draws no mesh, so it has no colour", args.entity)
+        })?;
     instance.color = args.color;
     Ok(ToolOutput::Json(
         json!({ "entity": args.entity, "color": args.color }),
@@ -716,8 +718,14 @@ mod tests {
         let before = call_json(&reg, &mut engine, "entity.list", json!({}))?;
         for (tool, args) in [
             ("entity.set_name", json!({ "entity": id, "name": "n" })),
-            ("entity.set_color", json!({ "entity": id, "color": [0, 1, 0, 1] })),
-            ("entity.set_mesh", json!({ "entity": id, "source": "builtin://sphere" })),
+            (
+                "entity.set_color",
+                json!({ "entity": id, "color": [0, 1, 0, 1] }),
+            ),
+            (
+                "entity.set_mesh",
+                json!({ "entity": id, "source": "builtin://sphere" }),
+            ),
         ] {
             crate::command::apply(&reg, &mut engine, tool, args)?;
         }
@@ -726,11 +734,17 @@ mod tests {
         for _ in 0..3 {
             assert!(crate::command::undo(&mut engine)?);
         }
-        assert_eq!(call_json(&reg, &mut engine, "entity.list", json!({}))?, before);
+        assert_eq!(
+            call_json(&reg, &mut engine, "entity.list", json!({}))?,
+            before
+        );
         for _ in 0..3 {
             assert!(crate::command::redo(&mut engine)?);
         }
-        assert_eq!(call_json(&reg, &mut engine, "entity.list", json!({}))?, after);
+        assert_eq!(
+            call_json(&reg, &mut engine, "entity.list", json!({}))?,
+            after
+        );
         Ok(())
     }
 
