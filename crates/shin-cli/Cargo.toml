@@ -1,0 +1,23 @@
+[package]
+name = "shin-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The `shin` command-line tool: create and manage Shin game projects."
+
+[[bin]]
+name = "shin"
+path = "src/main.rs"
+# The binary shares its name with the engine library `shin`; documenting
+# both would collide in `target/doc/shin`. The CLI is documented by `--help`.
+doc = false
+
+[dependencies]
+shin-engine = { path = "../shin-engine" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
