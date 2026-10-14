@@ -1,0 +1,19 @@
+# Build
+/target/
+**/target/
+
+# Private planning material (per CEO decision, kept out of the public repo)
+/docs/
+/tickets/
+
+# Agent tooling
+/.claude/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Golden-test diff output
+/crates/engine/tests/golden/_diff/

@@ -1,0 +1,6 @@
+# The shared build cache across worktrees is set via environment, not here,
+# because config paths are relative to the checkout. See CLAUDE.md "Build cache".
+
+[alias]
+check-all = "clippy --workspace --all-targets --all-features -- -D warnings"
+test-all = "test --workspace --all-targets"
