@@ -169,12 +169,13 @@ fn run_window(project: Project) -> anyhow::Result<()> {
     let scene = entry_scene(&project);
     game.render_fn = Some(Box::new(move |world, res, gpu, color, depth| {
         let texture = color.texture();
-        if res.get::<RenderState>().is_none() {
-            if let Err(err) = load_scene(world, res, gpu, texture.format(), scene.as_deref()) {
-                log::error!("{err:#}");
-                res.insert(ExitRequest(true));
-                return;
-            }
+        // The first frame loads the scene; on failure the game exits.
+        if res.get::<RenderState>().is_none()
+            && let Err(err) = load_scene(world, res, gpu, texture.format(), scene.as_deref())
+        {
+            log::error!("{err:#}");
+            res.insert(ExitRequest(true));
+            return;
         }
         let aspect = texture.width() as f32 / texture.height() as f32;
         render_world(world, res, gpu, color, depth, aspect);
