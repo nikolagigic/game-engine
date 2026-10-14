@@ -16,15 +16,23 @@
 //!
 //! [`create`] writes the starter project: `Cargo.toml`, `shin.toml`,
 //! `src/main.rs` (a lit cube on a ground slab with the fly camera),
-//! `assets/cube.gltf` + `assets/cube.bin`, `.gitignore`, and `README.md`.
+//! `scenes/main.scene.ron` (the same scene as a scene file, the project's
+//! entry scene), `assets/cube.gltf` + `assets/cube.bin`, `.mcp.json` (the
+//! engine as MCP tools), `.gitignore`, and `README.md`.
+//!
+//! An open project (GE-026, [`Headless::open_project`]) is marked by the
+//! [`ProjectRoot`] resource; the `project.open` and `project.info` tools
+//! open and describe one.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::headless::Headless;
+use crate::scene::{CameraDesc, EntityDesc, LightDesc, SceneFile, TransformDesc};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Name of the project manifest in a project's root directory.
@@ -41,7 +49,7 @@ pub struct Project {
     /// The game window.
     pub window: WindowSettings,
     /// The scene loaded at start-up, relative to the project root, e.g.
-    /// `scenes/main.scene.ron`. Unused until scenes exist (GE-021).
+    /// `scenes/main.scene.ron`. [`Headless::open_project`] loads it.
     pub entry_scene: Option<PathBuf>,
 }
 
@@ -131,6 +139,40 @@ impl Project {
     }
 }
 
+/// The root directory of the open project, as an absolute, canonical path.
+///
+/// [`Headless::open_project`] inserts it as a resource. While it is set,
+/// the `scene.*` tools resolve their paths with [`ProjectRoot::resolve`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectRoot(pub PathBuf);
+
+impl ProjectRoot {
+    /// `path` joined onto the root and normalised (`.` and `..` removed
+    /// without touching the file system, so the file need not exist).
+    ///
+    /// Fails, naming `path`, if the result is outside the root: a relative
+    /// path that climbs out with `..`, or an absolute path elsewhere.
+    pub fn resolve(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        let mut resolved = PathBuf::new();
+        for component in self.0.join(path).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                other => resolved.push(other),
+            }
+        }
+        anyhow::ensure!(
+            resolved.starts_with(&self.0),
+            "path `{}` escapes the project root {}",
+            path.display(),
+            self.0.display()
+        );
+        Ok(resolved)
+    }
+}
+
 /// Where a new project gets `shin-engine` from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineDep {
@@ -209,13 +251,16 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
         );
     }
 
-    let project = Project::new(&opts.name);
-    let files: [(&str, Vec<u8>); 7] = [
+    let mut project = Project::new(&opts.name);
+    project.entry_scene = Some(PathBuf::from(STARTER_SCENE));
+    let files: [(&str, Vec<u8>); 9] = [
         ("Cargo.toml", cargo_toml(&opts.name, &opts.engine)?.into()),
         (MANIFEST, project.to_toml()?.into()),
         ("src/main.rs", MAIN_RS.into()),
+        (STARTER_SCENE, starter_scene().to_ron()?.into()),
         ("assets/cube.gltf", CUBE_GLTF.into()),
         ("assets/cube.bin", CUBE_BIN.into()),
+        (".mcp.json", MCP_JSON.into()),
         (".gitignore", "/target\n".into()),
         ("README.md", readme(&opts.name).into()),
     ];
@@ -231,6 +276,70 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
     }
     log::info!("created project `{}` in {}", opts.name, dir.display());
     Ok(written)
+}
+
+/// Where [`create`] writes the starter scene, relative to the project root;
+/// also the generated project's `entry_scene`.
+pub const STARTER_SCENE: &str = "scenes/main.scene.ron";
+
+/// The generated `.mcp.json`: an MCP client such as Claude Code, opened in
+/// the project folder, starts `shin-mcp` on it and gets the engine as tools.
+const MCP_JSON: &str = r#"{
+  "mcpServers": {
+    "shin": {
+      "command": "shin-mcp",
+      "args": ["--project", "."]
+    }
+  }
+}
+"#;
+
+/// The starter scene as a scene file: the same lit cube on a ground slab
+/// that `src/main.rs` builds in code, drawn with the project's
+/// `assets/cube.gltf`.
+fn starter_scene() -> SceneFile {
+    let cube = |name: &str, transform: TransformDesc, color: [f32; 4]| EntityDesc {
+        name: Some(name.to_string()),
+        transform,
+        mesh: Some("assets/cube.gltf".to_string()),
+        color: Some(color),
+        texture: None,
+    };
+    SceneFile {
+        camera: Some(CameraDesc {
+            position: [0.0, 2.0, 5.0],
+            look_at: [0.0, 0.5, 0.0],
+            fov_y_deg: 60.0,
+        }),
+        light: Some(LightDesc {
+            direction: [-0.6, -1.0, -0.4],
+            color: [1.0, 0.95, 0.85],
+            ambient: [0.12, 0.13, 0.16],
+        }),
+        entities: vec![
+            // Ground: the cube flattened into a slab whose top face is y = 0.
+            cube(
+                "ground",
+                TransformDesc {
+                    translation: [0.0, -0.25, 0.0],
+                    scale: [20.0, 0.5, 20.0],
+                    ..Default::default()
+                },
+                [0.18, 0.2, 0.17, 1.0],
+            ),
+            // The cube, turned a little so the light catches three faces.
+            cube(
+                "cube",
+                TransformDesc {
+                    translation: [0.0, 0.5, 0.0],
+                    rotation_euler_deg: [0.0, 30.0, 0.0],
+                    ..Default::default()
+                },
+                [0.8, 0.25, 0.1, 1.0],
+            ),
+        ],
+        ..Default::default()
+    }
 }
 
 /// The project's `Cargo.toml`. Besides the engine it depends on `wgpu`
@@ -295,6 +404,12 @@ cargo run
 A lit cube on a ground slab. The window title and size come from
 `shin.toml`.
 
+## Drive it with an agent
+
+Open this folder in Claude Code and the engine is available as tools:
+`.mcp.json` starts `shin-mcp --project .`, which loads `shin.toml` and the
+entry scene, so an agent can inspect, edit, render, and save the scene.
+
 ## Controls
 
 - W/S: forward and back, A/D: strafe, E/Q: up and down
@@ -304,9 +419,11 @@ A lit cube on a ground slab. The window title and size come from
 ## Layout
 
 ```
-shin.toml       project name and window settings
+shin.toml       project name, window settings, and entry scene
 src/main.rs     the game: scene setup and systems
+scenes/         scene files (.scene.ron)
 assets/         glTF meshes and textures
+.mcp.json       the engine as MCP tools for agents
 ```
 "#
     )
@@ -326,8 +443,55 @@ struct NewArgs {
     engine_path: Option<PathBuf>,
 }
 
-/// Registers `project.new`.
+/// Arguments of `project.open`.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenArgs {
+    /// The project's root directory, the one containing `shin.toml`.
+    dir: PathBuf,
+}
+
+/// `project.info` takes no arguments.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfoArgs {}
+
+/// The `project.info` description of the open project: `{ name, dir,
+/// entry_scene, window: { title, width, height } }`. Re-reads `shin.toml`,
+/// so edits made since opening show up.
+fn info(engine: &Headless) -> anyhow::Result<serde_json::Value> {
+    let root = engine
+        .resources
+        .get::<ProjectRoot>()
+        .context("no project is open; call project.open first")?;
+    let project = Project::load(&root.0)?;
+    Ok(json!({
+        "name": project.name,
+        "dir": root.0,
+        "entry_scene": project.entry_scene,
+        "window": project.window,
+    }))
+}
+
+/// Registers `project.new`, `project.open`, and `project.info`.
 pub fn register_tools(reg: &mut ToolRegistry) {
+    reg.register(TypedTool::new(
+        "project.open",
+        "Opens the project in `dir` (the folder with shin.toml): replaces every entity, roots \
+         asset and scene paths at the project, resizes the render target to the project's \
+         window size, and loads its entry scene if it has one. Returns the same as \
+         project.info.",
+        |engine: &mut Headless, args: OpenArgs| {
+            engine.load_project(&args.dir)?;
+            Ok(ToolOutput::Json(info(engine)?))
+        },
+    ));
+    reg.register(TypedTool::new(
+        "project.info",
+        "Describes the open project: { name, dir, entry_scene, window: { title, width, \
+         height } }, read from its shin.toml. Fails if no project is open.",
+        |engine: &mut Headless, _: InfoArgs| Ok(ToolOutput::Json(info(engine)?)),
+    ));
     reg.register(TypedTool::new(
         "project.new",
         "Creates a runnable game project in `<dir>/<name>` (Cargo.toml, shin.toml, \
@@ -348,6 +512,7 @@ pub fn register_tools(reg: &mut ToolRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::Assets;
 
     /// A fresh, empty-or-missing directory under the system temp dir.
     fn temp_dir(label: &str) -> PathBuf {
@@ -426,8 +591,10 @@ mod tests {
                 "Cargo.toml",
                 "shin.toml",
                 "src/main.rs",
+                "scenes/main.scene.ron",
                 "assets/cube.gltf",
                 "assets/cube.bin",
+                ".mcp.json",
                 ".gitignore",
                 "README.md",
             ]
@@ -438,6 +605,190 @@ mod tests {
             cargo.contains(&format!(r#"git = "{ENGINE_GIT_URL}""#)),
             "{cargo}"
         );
+        let project = Project::load(&dir)?;
+        assert_eq!(project.entry_scene, Some(PathBuf::from(STARTER_SCENE)));
+        let scene = SceneFile::from_ron(&fs::read_to_string(dir.join(STARTER_SCENE))?)?;
+        assert_eq!(scene, starter_scene());
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn generated_mcp_json_runs_shin_mcp_on_the_project() -> anyhow::Result<()> {
+        let dir = temp_dir("mcp-json");
+        create(&NewProjectOptions {
+            name: "demo".to_string(),
+            dir: dir.clone(),
+            engine: EngineDep::default(),
+        })?;
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(".mcp.json"))?)?;
+        assert_eq!(
+            config,
+            json!({ "mcpServers": { "shin": {
+                "command": "shin-mcp",
+                "args": ["--project", "."],
+            } } })
+        );
+        let readme = fs::read_to_string(dir.join("README.md"))?;
+        assert!(readme.contains("Claude Code"), "{readme}");
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_root_resolves_inside_and_rejects_escapes() -> anyhow::Result<()> {
+        let root = ProjectRoot(PathBuf::from("/games/demo"));
+        assert_eq!(
+            root.resolve(Path::new("scenes/main.scene.ron"))?,
+            Path::new("/games/demo/scenes/main.scene.ron")
+        );
+        assert_eq!(
+            root.resolve(Path::new("./a/../b.scene.ron"))?,
+            Path::new("/games/demo/b.scene.ron")
+        );
+        assert_eq!(
+            root.resolve(Path::new("/games/demo/x.scene.ron"))?,
+            Path::new("/games/demo/x.scene.ron")
+        );
+        for bad in [
+            "../other/x.scene.ron",
+            "scenes/../../x.scene.ron",
+            "/etc/x.scene.ron",
+            "..",
+        ] {
+            let err = root.resolve(Path::new(bad)).unwrap_err().to_string();
+            assert!(err.contains(&format!("`{bad}`")), "{err}");
+            assert!(err.contains("escapes the project root"), "{err}");
+        }
+        // A sibling directory sharing the root's name as a prefix is outside.
+        assert!(root.resolve(Path::new("../demo2/x.scene.ron")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn project_tools_open_describe_and_confine_scene_paths() -> anyhow::Result<()> {
+        let dir = temp_dir("tools");
+        create(&NewProjectOptions {
+            name: "tool-game".to_string(),
+            dir: dir.clone(),
+            engine: EngineDep::default(),
+        })?;
+        let reg = ToolRegistry::with_engine_tools();
+        for name in ["project.open", "project.info"] {
+            let info = reg
+                .list()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is not registered"));
+            assert!(!info.description.is_empty(), "{name} has no description");
+        }
+
+        let mut engine = Headless::new(8, 8)?;
+        let err = reg
+            .call(&mut engine, "project.info", json!({}))
+            .unwrap_err();
+        assert!(err.to_string().contains("no project is open"), "{err}");
+
+        let ToolOutput::Json(opened) =
+            reg.call(&mut engine, "project.open", json!({ "dir": dir }))?
+        else {
+            panic!("expected JSON");
+        };
+        let root = dir.canonicalize()?;
+        assert_eq!(opened["name"], "tool-game");
+        assert_eq!(opened["dir"], json!(root));
+        assert_eq!(opened["entry_scene"], STARTER_SCENE);
+        assert_eq!(
+            opened["window"],
+            json!({ "title": "tool-game", "width": 1280, "height": 720 })
+        );
+        assert_eq!((engine.target.width, engine.target.height), (1280, 720));
+        assert_eq!(engine.world.len(), 2, "the entry scene's entities");
+        let ToolOutput::Json(info) = reg.call(&mut engine, "project.info", json!({}))? else {
+            panic!("expected JSON");
+        };
+        assert_eq!(info, opened);
+
+        // Relative scene paths land under the project root.
+        reg.call(
+            &mut engine,
+            "scene.save",
+            json!({ "path": "scenes/copy.scene.ron" }),
+        )?;
+        assert!(root.join("scenes/copy.scene.ron").is_file());
+        reg.call(
+            &mut engine,
+            "scene.load",
+            json!({ "path": "scenes/copy.scene.ron" }),
+        )?;
+        assert_eq!(engine.world.len(), 2);
+
+        // Escaping the root is an error naming the path, for both tools.
+        for tool in ["scene.save", "scene.load"] {
+            let err = reg
+                .call(&mut engine, tool, json!({ "path": "../escape.scene.ron" }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("../escape.scene.ron"), "{tool}: {err}");
+        }
+        assert!(!dir.join("../escape.scene.ron").exists());
+
+        // A directory without shin.toml fails and leaves the project open.
+        let err = reg
+            .call(
+                &mut engine,
+                "project.open",
+                json!({ "dir": dir.join("scenes") }),
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains(MANIFEST), "{err:#}");
+        assert_eq!(
+            engine.resources.get::<ProjectRoot>(),
+            Some(&ProjectRoot(root))
+        );
+        assert_eq!(engine.world.len(), 2);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn broken_entry_scene_leaves_the_engine_unchanged() -> anyhow::Result<()> {
+        let dir = temp_dir("broken-entry");
+        create(&NewProjectOptions {
+            name: "broken".to_string(),
+            dir: dir.clone(),
+            engine: EngineDep::default(),
+        })?;
+        fs::write(dir.join(STARTER_SCENE), "(version: 1, bogus: 3)")?;
+        let mut engine = Headless::new(8, 8)?;
+        let assets_root = engine.resources.expect::<Assets>().root().to_path_buf();
+        let err = engine.load_project(&dir).unwrap_err();
+        assert!(format!("{err:#}").contains("bogus"), "{err:#}");
+        assert!(engine.resources.get::<ProjectRoot>().is_none());
+        assert_eq!(engine.resources.expect::<Assets>().root(), assets_root);
+        assert_eq!((engine.target.width, engine.target.height), (8, 8));
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn open_project_sizes_the_target_from_shin_toml() -> anyhow::Result<()> {
+        let dir = temp_dir("open");
+        create(&NewProjectOptions {
+            name: "sized".to_string(),
+            dir: dir.clone(),
+            engine: EngineDep::default(),
+        })?;
+        let mut project = Project::load(&dir)?;
+        project.window.width = 64;
+        project.window.height = 32;
+        project.save(&dir)?;
+        let mut engine = Headless::open_project(&dir)?;
+        assert_eq!((engine.target.width, engine.target.height), (64, 32));
+        assert_eq!(engine.world.len(), 2);
+        assert_eq!(engine.render()?.dimensions(), (64, 32));
         fs::remove_dir_all(&dir)?;
         Ok(())
     }

@@ -19,3 +19,7 @@ base64 = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+
+[dev-dependencies]
+# Already an engine dependency; the integration tests decode rendered PNGs.
+image = { workspace = true }

@@ -2,8 +2,14 @@
 //! [`shin::tool::ToolRegistry`] (GE-014).
 //!
 //! ```text
-//! shin-mcp [--width W] [--height H] [--log-level L]
+//! shin-mcp [--project DIR] [--width W] [--height H] [--log-level L]
 //! ```
+//!
+//! With `--project` (GE-026) the engine opens the project in `DIR`
+//! ([`Headless::open_project`]): assets and scene paths are rooted there,
+//! its entry scene is loaded, and frames default to its window size from
+//! `shin.toml`. Without it the engine is empty and frames are 512x288.
+//! `--width` and `--height` override either default.
 //!
 //! stdout carries only JSON-RPC; logs go to stderr. `--log-level` takes an
 //! `env_logger` filter (e.g. `debug`, `engine=trace`) and overrides
@@ -12,32 +18,32 @@
 mod engine_thread;
 mod server;
 
+use std::path::PathBuf;
+
 use anyhow::{Context as _, bail};
 use rmcp::ServiceExt as _;
+use shin::headless::Headless;
 use shin::tool::ToolRegistry;
 
 use crate::engine_thread::EngineHandle;
 use crate::server::EngineServer;
 
+/// Frame size without `--project`, `--width`, or `--height`.
+const DEFAULT_SIZE: (u32, u32) = (512, 288);
+
 /// Command-line options.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 struct Options {
-    width: u32,
-    height: u32,
+    /// Project directory to open, if any.
+    project: Option<PathBuf>,
+    /// Frame width override.
+    width: Option<u32>,
+    /// Frame height override.
+    height: Option<u32>,
     log_level: Option<String>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            width: 512,
-            height: 288,
-            log_level: None,
-        }
-    }
-}
-
-const USAGE: &str = "usage: shin-mcp [--width W] [--height H] [--log-level L]";
+const USAGE: &str = "usage: shin-mcp [--project DIR] [--width W] [--height H] [--log-level L]";
 
 /// Parses the arguments after the program name.
 fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Options> {
@@ -45,8 +51,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Options>
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--width" => options.width = parse_size(&flag, &value(&mut args, &flag)?)?,
-            "--height" => options.height = parse_size(&flag, &value(&mut args, &flag)?)?,
+            "--project" => options.project = Some(value(&mut args, &flag)?.into()),
+            "--width" => options.width = Some(parse_size(&flag, &value(&mut args, &flag)?)?),
+            "--height" => options.height = Some(parse_size(&flag, &value(&mut args, &flag)?)?),
             "--log-level" => options.log_level = Some(value(&mut args, &flag)?),
             "-h" | "--help" => bail!("{USAGE}"),
             other => bail!("unknown argument `{other}`\n{USAGE}"),
@@ -69,6 +76,19 @@ fn parse_size(flag: &str, value: &str) -> anyhow::Result<u32> {
     }
 }
 
+/// Creates the engine `options` describe: the project opened, or an empty
+/// engine, then resized to any `--width`/`--height` override.
+fn create_engine(options: &Options) -> anyhow::Result<Headless> {
+    let mut engine = match &options.project {
+        Some(dir) => Headless::open_project(dir)?,
+        None => Headless::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1)?,
+    };
+    let width = options.width.unwrap_or(engine.target.width);
+    let height = options.height.unwrap_or(engine.target.height);
+    engine.resize(width, height);
+    Ok(engine)
+}
+
 fn main() -> anyhow::Result<()> {
     let options = parse_args(std::env::args().skip(1))?;
 
@@ -82,11 +102,13 @@ fn main() -> anyhow::Result<()> {
 
     let registry = ToolRegistry::with_engine_tools();
     let tools = registry.list();
-    let engine = EngineHandle::spawn(registry, options.width, options.height)?;
+    let project = options.project.clone();
+    let engine = EngineHandle::spawn(registry, move || create_engine(&options))?;
     log::info!(
-        "shin-mcp: {}x{} headless engine, {} tools, serving on stdio",
-        options.width,
-        options.height,
+        "shin-mcp: headless engine{}, {} tools, serving on stdio",
+        project
+            .map(|dir| format!(" on project {}", dir.display()))
+            .unwrap_or_default(),
         tools.len()
     );
 
@@ -114,13 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_512_by_288() {
+    fn defaults_to_no_project_and_no_overrides() {
         assert_eq!(parse_args(args(&[])).unwrap(), Options::default());
     }
 
     #[test]
     fn parses_every_flag() {
         let options = parse_args(args(&[
+            "--project",
+            "games/demo",
             "--width",
             "64",
             "--height",
@@ -132,8 +156,9 @@ mod tests {
         assert_eq!(
             options,
             Options {
-                width: 64,
-                height: 32,
+                project: Some(PathBuf::from("games/demo")),
+                width: Some(64),
+                height: Some(32),
                 log_level: Some("debug".into()),
             }
         );
@@ -143,6 +168,19 @@ mod tests {
     fn rejects_bad_input() {
         assert!(parse_args(args(&["--width", "0"])).is_err());
         assert!(parse_args(args(&["--width"])).is_err());
+        assert!(parse_args(args(&["--project"])).is_err());
         assert!(parse_args(args(&["--frobnicate"])).is_err());
+    }
+
+    #[test]
+    fn engine_without_project_is_512_by_288_unless_overridden() -> anyhow::Result<()> {
+        let engine = create_engine(&Options::default())?;
+        assert_eq!((engine.target.width, engine.target.height), DEFAULT_SIZE);
+        let engine = create_engine(&Options {
+            height: Some(10),
+            ..Default::default()
+        })?;
+        assert_eq!((engine.target.width, engine.target.height), (512, 10));
+        Ok(())
     }
 }
