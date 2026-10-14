@@ -270,8 +270,9 @@ impl ToolRegistry {
     /// [`Self::with_builtins`] plus every subsystem's tools: assets
     /// (`scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
     /// `sim.step`), render (`mesh.list`, `camera.set`, `light.set`,
-    /// `render.frame`), stats (`stats.summary`), and projects
-    /// (`project.new`). This is the registry
+    /// `render.frame`), stats (`stats.summary`), projects
+    /// (`project.new`), and scene files (`scene.save`, `scene.load`). This
+    /// is the registry
     /// `shin-mcp` serves.
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
@@ -280,6 +281,7 @@ impl ToolRegistry {
         crate::render::register_tools(&mut registry);
         crate::stats::register_tools(&mut registry);
         crate::project::register_tools(&mut registry);
+        crate::scene::register_tools(&mut registry);
         registry
     }
 

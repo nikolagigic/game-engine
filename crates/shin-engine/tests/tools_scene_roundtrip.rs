@@ -107,6 +107,8 @@ fn every_tool_field_has_a_description() {
         "light.set",
         "sim.step",
         "render.frame",
+        "scene.save",
+        "scene.load",
     ] {
         assert!(
             names.contains(&expected),
