@@ -61,12 +61,15 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 | `math`   | glam re-exports, `Transform`, `Camera`                     | GE-003         |
 | `ecs`    | `World` wrapper, `Schedule`, `Time`, `Resources`          | GE-004         |
 | `asset`  | glTF + texture loading into CPU-side `MeshData`/`ImageData` | GE-005       |
+| `asset::registry` | `AssetSource` (`builtin://cube`, `path#index`), `Assets` cache by source | GE-019 |
 | `render` | GPU mesh upload, material, shaders, instanced draw         | GE-006, GE-008 |
 | `input`  | `InputState`, free-fly camera controller                   | GE-007         |
 | `stats`  | frame-time ring buffer and reporting                       | GE-009         |
 | `tool`   | `Tool` trait, `ToolRegistry`, `ToolOutput`                 | GE-013, GE-015 |
 | `headless` | window-less engine handle for tools, tests, benchmarks   | GE-013         |
+| `project` | `shin.toml` manifest, `project::create` scaffolding, `project.new` | GE-018 |
 | crate `shin-mcp`   | stdio MCP server over the registry               | GE-014         |
+| crate `shin-cli`   | `shin new <name>` (and later `shin edit`)         | GE-018         |
 
 Public API surface should stay small. Prefer `pub(crate)` until a ticket
 explicitly asks for a public type.
