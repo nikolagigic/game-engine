@@ -5,6 +5,13 @@
 //! is advanced explicitly with [`Headless::step`] (no wall clock), and
 //! frames are produced on demand with [`Headless::render`], so results are
 //! deterministic.
+//!
+//! Play mode (GE-024): [`Headless::play`], [`Headless::pause`], and
+//! [`Headless::stop`] snapshot the scene and restore it, with the
+//! [`PlayState`] resource saying which mode the engine is in; see [`play`].
+//! Tools: [`register_tools`] adds `sim.play`, `sim.pause`, and `sim.stop`.
+
+pub mod play;
 
 use std::path::Path;
 
@@ -19,6 +26,8 @@ use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
 use crate::scene;
 use crate::stats::{FrameStats, frame_stats_system};
+
+pub use play::{PlaySnapshot, PlayState, register_tools};
 
 /// A window-less engine: everything [`crate::app::EcsGame`] has, plus a GPU
 /// context and an offscreen target instead of a window.
@@ -51,7 +60,7 @@ impl Headless {
     /// [`frame_stats_system`]: [`Self::from_parts`] with empty parts.
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
-    /// [`default_light`]; [`default_camera`]; and an [`Assets`] cache
+    /// [`default_light`]; [`default_camera`]; [`PlayState::Edit`]; and an [`Assets`] cache
     /// rooted at the current working directory. [`Self::render_fn`]
     /// draws the world with [`render_world`], so spawning an entity with a
     /// `Transform` and a `MeshInstance` is enough to see it.
@@ -76,8 +85,8 @@ impl Headless {
     /// schedule (add [`frame_stats_system`] for frame statistics). Each
     /// resource [`Self::new`] installs that `resources` lacks is inserted
     /// with the same default: [`Time`], [`FrameStats`], a [`RenderState`]
-    /// with [`default_light`], [`default_camera`], and [`Assets`] rooted at
-    /// the working directory. Resources already present are kept.
+    /// with [`default_light`], [`default_camera`], [`PlayState::Edit`], and
+    /// [`Assets`] rooted at the working directory. Resources already present are kept.
     /// `resources` should not hold a [`RenderState`]: GPU objects made on
     /// another device cannot be drawn here. [`Self::render_fn`] draws the
     /// world with [`render_world`].
@@ -133,6 +142,9 @@ impl Headless {
         }
         if resources.get::<Camera>().is_none() {
             resources.insert(default_camera());
+        }
+        if resources.get::<PlayState>().is_none() {
+            resources.insert(PlayState::Edit);
         }
         if resources.get::<Assets>().is_none() {
             let cwd = std::env::current_dir().context("failed to read the working directory")?;
