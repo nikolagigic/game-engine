@@ -1,0 +1,5 @@
+# Gitignored paths that Claude Code copies into each `claude --worktree` checkout.
+# Same syntax as .gitignore. Developers need the tickets and ADRs even though
+# they are not committed.
+tickets/
+docs/
