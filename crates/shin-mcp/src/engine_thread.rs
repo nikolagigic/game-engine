@@ -30,16 +30,19 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    /// Spawns the engine thread, creates a `width`×`height` [`Headless`]
-    /// engine on it, and waits until creation succeeded or failed.
-    pub fn spawn(registry: ToolRegistry, width: u32, height: u32) -> anyhow::Result<Self> {
+    /// Spawns the engine thread, creates the [`Headless`] engine on it with
+    /// `create`, and waits until creation succeeded or failed.
+    pub fn spawn(
+        registry: ToolRegistry,
+        create: impl FnOnce() -> anyhow::Result<Headless> + Send + 'static,
+    ) -> anyhow::Result<Self> {
         let (calls, inbox) = mpsc::channel::<Call>();
         let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<()>>();
 
         thread::Builder::new()
             .name("engine".into())
             .spawn(move || {
-                let mut engine = match Headless::new(width, height) {
+                let mut engine = match create() {
                     Ok(engine) => {
                         let _ = ready_tx.send(Ok(()));
                         engine
