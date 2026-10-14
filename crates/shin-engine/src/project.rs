@@ -15,10 +15,13 @@
 //! ```
 //!
 //! [`create`] writes the starter project: `Cargo.toml`, `shin.toml`,
-//! `src/main.rs` (a lit cube on a ground slab with the fly camera),
-//! `scenes/main.scene.ron` (the same scene as a scene file, the project's
-//! entry scene), `assets/cube.gltf` + `assets/cube.bin`, `.mcp.json` (the
-//! engine as MCP tools), `.gitignore`, and `README.md`.
+//! `src/main.rs` (the game: it plays `scenes/main.scene.ron` in a window
+//! with the fly camera and an orbit system of its own, or with `--mcp`
+//! serves the same world, systems, and a `game.hello` tool over MCP; GE-027),
+//! `scenes/main.scene.ron` (a lit cube on a ground slab with a small moon
+//! orbiting it, the project's entry scene), `assets/cube.gltf` +
+//! `assets/cube.bin`, `.mcp.json` (runs the game with `--mcp`),
+//! `.gitignore`, and `README.md`.
 //!
 //! An open project (GE-026, [`Headless::open_project`]) is marked by the
 //! [`ProjectRoot`] resource; the `project.open` and `project.info` tools
@@ -283,20 +286,22 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
 pub const STARTER_SCENE: &str = "scenes/main.scene.ron";
 
 /// The generated `.mcp.json`: an MCP client such as Claude Code, opened in
-/// the project folder, starts `shin-mcp` on it and gets the engine as tools.
+/// the project folder, runs the game with `--mcp` and gets the engine's
+/// tools and the game's own as tools, on the game's own systems.
 const MCP_JSON: &str = r#"{
   "mcpServers": {
     "shin": {
-      "command": "shin-mcp",
-      "args": ["--project", "."]
+      "command": "cargo",
+      "args": ["run", "--quiet", "--", "--mcp"]
     }
   }
 }
 "#;
 
-/// The starter scene as a scene file: the same lit cube on a ground slab
-/// that `src/main.rs` builds in code, drawn with the project's
-/// `assets/cube.gltf`.
+/// The starter scene, drawn with the project's `assets/cube.gltf`: a
+/// ground slab, a cube on it, and a small `moon` beside the cube. The
+/// template's orbit system moves the moon; it starts where that system
+/// puts it at time zero, `(1.6, 0.5, 0)`.
 fn starter_scene() -> SceneFile {
     let cube = |name: &str, transform: TransformDesc, color: [f32; 4]| EntityDesc {
         name: Some(name.to_string()),
@@ -337,24 +342,42 @@ fn starter_scene() -> SceneFile {
                 },
                 [0.8, 0.25, 0.1, 1.0],
             ),
+            // Orbits the cube, driven by `orbit_system` in `src/main.rs`.
+            cube(
+                "moon",
+                TransformDesc {
+                    translation: [1.6, 0.5, 0.0],
+                    scale: [0.3, 0.3, 0.3],
+                    ..Default::default()
+                },
+                [0.75, 0.78, 0.85, 1.0],
+            ),
         ],
         ..Default::default()
     }
 }
 
-/// The project's `Cargo.toml`. Besides the engine it depends on `wgpu`
-/// (for `wgpu::Color`), `anyhow` and `env_logger`, at the versions the
+/// The project's `Cargo.toml`. It depends on the engine and on `shin-mcp`
+/// (for `--mcp`), both from the same place: the git repository, or for
+/// [`EngineDep::Path`] the engine directory and its sibling `shin-mcp`
+/// (`crates/shin-engine` and `crates/shin-mcp` of a checkout). It also
+/// depends on `wgpu` (for `wgpu::Color`), `anyhow`, `env_logger`, `log`,
+/// and `serde` + `schemars` (for tool arguments), at the versions the
 /// engine itself pins.
 fn cargo_toml(name: &str, engine: &EngineDep) -> anyhow::Result<String> {
-    let engine = match engine {
-        EngineDep::Git { url } => format!("{{ git = {} }}", toml_string(url)),
+    let (engine, mcp) = match engine {
+        EngineDep::Git { url } => {
+            let dep = format!("{{ git = {} }}", toml_string(url));
+            (dep.clone(), dep)
+        }
         EngineDep::Path(path) => {
-            let path = std::path::absolute(path)
+            let engine = std::path::absolute(path)
                 .with_context(|| format!("resolving engine path {}", path.display()))?;
-            let path = path
-                .to_str()
-                .with_context(|| format!("engine path {} is not UTF-8", path.display()))?;
-            format!("{{ path = {} }}", toml_string(path))
+            let mcp = engine
+                .parent()
+                .with_context(|| format!("engine path {} has no parent", engine.display()))?
+                .join("shin-mcp");
+            (path_dep(&engine)?, path_dep(&mcp)?)
         }
     };
     Ok(format!(
@@ -366,9 +389,13 @@ publish = false
 
 [dependencies]
 shin-engine = {engine}
+shin-mcp = {mcp}
 wgpu = "30.0"
 anyhow = "1.0"
 env_logger = "0.11"
+log = "0.4"
+serde = {{ version = "1.0", features = ["derive"] }}
+schemars = "1.2"
 
 # Optimise dependencies even in debug builds so the game runs smoothly.
 [profile.dev]
@@ -381,6 +408,14 @@ opt-level = 3
 [workspace]
 "#
     ))
+}
+
+/// `{ path = "<path>" }` for an absolute `path`.
+fn path_dep(path: &Path) -> anyhow::Result<String> {
+    let text = path
+        .to_str()
+        .with_context(|| format!("engine path {} is not UTF-8", path.display()))?;
+    Ok(format!("{{ path = {} }}", toml_string(text)))
 }
 
 /// `s` as a quoted, escaped TOML string.
@@ -401,14 +436,56 @@ A game made with [Shin]({ENGINE_GIT_URL}).
 cargo run
 ```
 
-A lit cube on a ground slab. The window title and size come from
-`shin.toml`.
+A lit cube on a ground slab with a small moon orbiting it. The window
+title and size come from `shin.toml`, the scene from
+`scenes/main.scene.ron`, and the orbit from `orbit_system` in
+`src/main.rs`.
 
 ## Drive it with an agent
 
-Open this folder in Claude Code and the engine is available as tools:
-`.mcp.json` starts `shin-mcp --project .`, which loads `shin.toml` and the
-entry scene, so an agent can inspect, edit, render, and save the scene.
+```sh
+cargo run -- --mcp
+```
+
+With `--mcp` the game opens no window. It serves itself over MCP on
+stdin/stdout instead (logs go to stderr), with the same world and systems
+as the windowed game and this project open. An agent can step the
+simulation (`sim.step`) and watch the moon move, inspect and edit the
+scene, render frames, save scenes, and undo its edits, all running your
+game's own code.
+
+Open this folder in Claude Code and that happens for you: `.mcp.json` runs
+`cargo run --quiet -- --mcp`. The first start compiles the game, which can
+take a minute.
+
+### Add a tool
+
+Agents get the engine's tools plus the game's own. `register_game_tools`
+in `src/main.rs` registers one example, `game.hello`, which returns the
+game's name. To add yours, register another `TypedTool` there:
+
+```rust
+/// Arguments of `game.set_speed`.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SpeedArgs {{
+    /// Simulation speed: 1.0 is normal, 2.0 is twice as fast.
+    factor: f64,
+}}
+
+registry.register(TypedTool::new(
+    "game.set_speed",
+    "Sets how much simulated time each step covers, relative to normal.",
+    |engine: &mut Headless, args: SpeedArgs| {{
+        engine.fixed_dt = args.factor / 60.0;
+        Ok(ToolOutput::Text(format!("speed {{}}", args.factor)))
+    }},
+));
+```
+
+The doc comments on the arguments become the tool's JSON schema, which is
+what the agent reads. Name tools `<subsystem>.<verb>`. Systems you add to
+`game_schedule` in `src/main.rs` run under `--mcp` too.
 
 ## Controls
 
@@ -420,10 +497,10 @@ entry scene, so an agent can inspect, edit, render, and save the scene.
 
 ```
 shin.toml       project name, window settings, and entry scene
-src/main.rs     the game: scene setup and systems
+src/main.rs     the game: systems, tools, window and --mcp modes
 scenes/         scene files (.scene.ron)
 assets/         glTF meshes and textures
-.mcp.json       the engine as MCP tools for agents
+.mcp.json       runs the game with --mcp for agents
 ```
 "#
     )
@@ -614,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_mcp_json_runs_shin_mcp_on_the_project() -> anyhow::Result<()> {
+    fn generated_mcp_json_runs_the_game_with_mcp() -> anyhow::Result<()> {
         let dir = temp_dir("mcp-json");
         create(&NewProjectOptions {
             name: "demo".to_string(),
@@ -626,12 +703,14 @@ mod tests {
         assert_eq!(
             config,
             json!({ "mcpServers": { "shin": {
-                "command": "shin-mcp",
-                "args": ["--project", "."],
+                "command": "cargo",
+                "args": ["run", "--quiet", "--", "--mcp"],
             } } })
         );
         let readme = fs::read_to_string(dir.join("README.md"))?;
         assert!(readme.contains("Claude Code"), "{readme}");
+        assert!(readme.contains("cargo run -- --mcp"), "{readme}");
+        assert!(readme.contains("register_game_tools"), "{readme}");
         fs::remove_dir_all(&dir)?;
         Ok(())
     }
@@ -704,7 +783,7 @@ mod tests {
             json!({ "title": "tool-game", "width": 1280, "height": 720 })
         );
         assert_eq!((engine.target.width, engine.target.height), (1280, 720));
-        assert_eq!(engine.world.len(), 2, "the entry scene's entities");
+        assert_eq!(engine.world.len(), 3, "the entry scene's entities");
         let ToolOutput::Json(info) = reg.call(&mut engine, "project.info", json!({}))? else {
             panic!("expected JSON");
         };
@@ -722,7 +801,7 @@ mod tests {
             "scene.load",
             json!({ "path": "scenes/copy.scene.ron" }),
         )?;
-        assert_eq!(engine.world.len(), 2);
+        assert_eq!(engine.world.len(), 3);
 
         // Escaping the root is an error naming the path, for both tools.
         for tool in ["scene.save", "scene.load"] {
@@ -747,7 +826,7 @@ mod tests {
             engine.resources.get::<ProjectRoot>(),
             Some(&ProjectRoot(root))
         );
-        assert_eq!(engine.world.len(), 2);
+        assert_eq!(engine.world.len(), 3);
 
         fs::remove_dir_all(&dir)?;
         Ok(())
@@ -787,7 +866,7 @@ mod tests {
         project.save(&dir)?;
         let mut engine = Headless::open_project(&dir)?;
         assert_eq!((engine.target.width, engine.target.height), (64, 32));
-        assert_eq!(engine.world.len(), 2);
+        assert_eq!(engine.world.len(), 3);
         assert_eq!(engine.render()?.dimensions(), (64, 32));
         fs::remove_dir_all(&dir)?;
         Ok(())
@@ -821,6 +900,24 @@ mod tests {
             .expect("path is a string");
         assert!(Path::new(path).is_absolute(), "{path}");
         assert!(path.ends_with("rel/eng\"ine"), "{path}");
+        // `shin-mcp` is the engine directory's sibling.
+        let mcp = parsed["dependencies"]["shin-mcp"]["path"]
+            .as_str()
+            .expect("shin-mcp path is a string");
+        assert_eq!(Path::new(mcp), Path::new(path).with_file_name("shin-mcp"));
+        Ok(())
+    }
+
+    #[test]
+    fn git_engine_dep_also_supplies_shin_mcp() -> anyhow::Result<()> {
+        let parsed: toml::Table = cargo_toml("x", &EngineDep::default())?.parse()?;
+        for dep in ["shin-engine", "shin-mcp"] {
+            assert_eq!(
+                parsed["dependencies"][dep]["git"].as_str(),
+                Some(ENGINE_GIT_URL),
+                "{dep}"
+            );
+        }
         Ok(())
     }
 }

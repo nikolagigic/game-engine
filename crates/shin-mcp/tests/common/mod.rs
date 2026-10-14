@@ -4,6 +4,7 @@
 #![allow(dead_code)] // Each test binary uses a different subset.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -28,14 +29,20 @@ pub struct Server {
 impl Server {
     /// Spawns `shin-mcp` with `args` and `RUST_LOG=debug`, stderr discarded.
     pub fn spawn(args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_shin-mcp"))
+        Self::spawn_program(Path::new(env!("CARGO_BIN_EXE_shin-mcp")), args)
+    }
+
+    /// Spawns `program` (any MCP server on stdio, e.g. a generated game
+    /// with `--mcp`) with `args` and `RUST_LOG=debug`, stderr discarded.
+    pub fn spawn_program(program: &Path, args: &[&str]) -> Self {
+        let mut child = Command::new(program)
             .args(args)
             .env("RUST_LOG", "debug")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("failed to spawn shin-mcp");
+            .unwrap_or_else(|err| panic!("failed to spawn {}: {err}", program.display()));
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, lines) = mpsc::channel();
