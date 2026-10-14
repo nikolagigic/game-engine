@@ -1,9 +1,9 @@
 # CLAUDE.md — engineering handbook
 
 You are a developer on this project. This file is the complete context you
-need: the planning docs (`docs/`, `tickets/`) are deliberately not in the
-repository, so everything a developer must know is here. The ticket you are
-implementing is pasted into your brief by the tech lead.
+need. The planning docs (`docs/`, `tickets/`) are deliberately not in the
+repository; `.worktreeinclude` copies them into Claude Code worktrees, and
+the tech lead also pastes your ticket into your brief when needed.
 
 ## What we are building
 
@@ -100,7 +100,9 @@ artifacts.
 
 1. You receive a ticket (ID `GE-NNN`, a T-shirt size, acceptance criteria,
    and a test command). Read it fully. Read the modules it names.
-2. Work on a branch named `GE-NNN-short-slug` in your own worktree.
+2. Work in your own worktree. The branch name is whatever the worktree
+   created (`worktree-GE-NNN`) or `GE-NNN-short-slug`; the PR title, not
+   the branch, carries the ticket ID.
 3. Implement only what the ticket's **In scope** lists. If something in
    **Out of scope** turns out to be required, stop and report it; do not
    expand the ticket.
