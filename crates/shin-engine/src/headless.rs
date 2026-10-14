@@ -48,7 +48,7 @@ pub struct Headless {
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
     /// offscreen target, with an empty world and a schedule holding only
-    /// [`frame_stats_system`].
+    /// [`frame_stats_system`]: [`Self::from_parts`] with empty parts.
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
     /// [`default_light`]; [`default_camera`]; and an [`Assets`] cache
@@ -58,11 +58,40 @@ impl Headless {
     ///
     /// Fails if no GPU adapter is available or a dimension is zero.
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            width > 0 && height > 0,
-            "headless target must be at least 1x1, got {width}x{height}"
-        );
-        Self::from_gpu(GpuContext::new(None)?, width, height)
+        Self::from_parts(
+            World::new(),
+            Resources::new(),
+            default_schedule(),
+            (width, height),
+        )
+    }
+
+    /// A headless engine over a world, resources, and schedule the caller
+    /// built, with a new GPU context and a `size.0` x `size.1` offscreen
+    /// target. This is how a game serves its own world (GE-027): it builds
+    /// the parts it would give [`crate::app::EcsGame`], its own systems in
+    /// `schedule`, and wraps them here.
+    ///
+    /// `world` and `schedule` are used as given; nothing is added to the
+    /// schedule (add [`frame_stats_system`] for frame statistics). Each
+    /// resource [`Self::new`] installs that `resources` lacks is inserted
+    /// with the same default: [`Time`], [`FrameStats`], a [`RenderState`]
+    /// with [`default_light`], [`default_camera`], and [`Assets`] rooted at
+    /// the working directory. Resources already present are kept.
+    /// `resources` should not hold a [`RenderState`]: GPU objects made on
+    /// another device cannot be drawn here. [`Self::render_fn`] draws the
+    /// world with [`render_world`].
+    ///
+    /// Fails if a dimension is zero (checked before the GPU is touched) or
+    /// no GPU adapter is available.
+    pub fn from_parts(
+        world: World,
+        resources: Resources,
+        schedule: Schedule,
+        size: (u32, u32),
+    ) -> anyhow::Result<Self> {
+        check_size(size)?;
+        Self::assemble(GpuContext::new(None)?, world, resources, schedule, size)
     }
 
     /// [`Self::new`] on an existing GPU context, for example a clone of a
@@ -71,22 +100,44 @@ impl Headless {
     ///
     /// Fails if a dimension is zero.
     pub fn from_gpu(gpu: GpuContext, width: u32, height: u32) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            width > 0 && height > 0,
-            "headless target must be at least 1x1, got {width}x{height}"
-        );
-        let target = OffscreenTarget::new(&gpu.device, width, height);
-        let mut resources = Resources::new();
-        resources.insert(Time::default());
-        resources.insert(FrameStats::default());
-        let mut schedule = Schedule::new();
-        schedule.add_frame("frame_stats", frame_stats_system);
-        let mut render_state = RenderState::new(&gpu.device, &gpu.queue, OFFSCREEN_COLOR_FORMAT);
-        render_state.light = default_light();
-        resources.insert(render_state);
-        resources.insert(default_camera());
-        let cwd = std::env::current_dir().context("failed to read the working directory")?;
-        resources.insert(Assets::new(cwd));
+        Self::assemble(
+            gpu,
+            World::new(),
+            Resources::new(),
+            default_schedule(),
+            (width, height),
+        )
+    }
+
+    /// Shared body of [`Self::from_parts`] and [`Self::from_gpu`]: inserts
+    /// missing default resources and creates the target on `gpu`.
+    fn assemble(
+        gpu: GpuContext,
+        world: World,
+        mut resources: Resources,
+        schedule: Schedule,
+        size: (u32, u32),
+    ) -> anyhow::Result<Self> {
+        check_size(size)?;
+        let target = OffscreenTarget::new(&gpu.device, size.0, size.1);
+        if resources.get::<Time>().is_none() {
+            resources.insert(Time::default());
+        }
+        if resources.get::<FrameStats>().is_none() {
+            resources.insert(FrameStats::default());
+        }
+        if resources.get::<RenderState>().is_none() {
+            let mut state = RenderState::new(&gpu.device, &gpu.queue, OFFSCREEN_COLOR_FORMAT);
+            state.light = default_light();
+            resources.insert(state);
+        }
+        if resources.get::<Camera>().is_none() {
+            resources.insert(default_camera());
+        }
+        if resources.get::<Assets>().is_none() {
+            let cwd = std::env::current_dir().context("failed to read the working directory")?;
+            resources.insert(Assets::new(cwd));
+        }
         let render_fn: RenderFn = Box::new(|world, res, ctx, color, depth| {
             let size = color.texture().size();
             let aspect = size.width as f32 / size.height as f32;
@@ -94,7 +145,7 @@ impl Headless {
         });
         Ok(Self {
             gpu,
-            world: World::new(),
+            world,
             resources,
             schedule,
             target,
@@ -277,6 +328,22 @@ impl Headless {
     }
 }
 
+/// Fails unless both dimensions of `size` are non-zero.
+fn check_size((width, height): (u32, u32)) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "headless target must be at least 1x1, got {width}x{height}"
+    );
+    Ok(())
+}
+
+/// The schedule [`Headless::new`] starts with: just [`frame_stats_system`].
+fn default_schedule() -> Schedule {
+    let mut schedule = Schedule::new();
+    schedule.add_frame("frame_stats", frame_stats_system);
+    schedule
+}
+
 /// The camera [`Headless::new`] installs: at `(0, 2, 5)` looking at the
 /// origin, 45° vertical field of view, clip planes 0.1..100.
 pub fn default_camera() -> Camera {
@@ -336,5 +403,52 @@ mod tests {
         assert_eq!(engine.resources.get::<bool>(), Some(&true));
         assert_eq!(engine.resources.get::<u8>(), Some(&7));
         Ok(())
+    }
+
+    /// Fixed system: counts steps in a `u32` resource.
+    fn count_steps(_: &mut World, res: &mut Resources) {
+        *res.expect_mut::<u32>() += 1;
+    }
+
+    #[test]
+    fn from_parts_keeps_the_parts_and_fills_in_missing_resources() -> anyhow::Result<()> {
+        let mut world = World::new();
+        let entity = world.spawn((Transform::from_translation(Vec3::X),));
+        let mut resources = Resources::new();
+        resources.insert(0_u32);
+        let mut camera = default_camera();
+        camera.transform.translation = Vec3::new(0.0, 9.0, 0.0);
+        resources.insert(camera);
+        let mut schedule = Schedule::new();
+        schedule.add_fixed("count_steps", count_steps);
+
+        let mut engine = Headless::from_parts(world, resources, schedule, (12, 6))?;
+        assert_eq!((engine.target.width, engine.target.height), (12, 6));
+        // The caller's world, resources, and systems are used as given...
+        assert!(engine.world.contains(entity));
+        assert_eq!(
+            engine.resources.expect::<Camera>().transform.translation,
+            Vec3::new(0.0, 9.0, 0.0)
+        );
+        engine.step(3);
+        assert_eq!(engine.resources.get::<u32>(), Some(&3));
+        assert_eq!(engine.resources.expect::<Time>().fixed_steps, 3);
+        // ...and what `new` installs is filled in where missing.
+        assert!(engine.resources.get::<FrameStats>().is_some());
+        assert_eq!(
+            engine.resources.expect::<RenderState>().light.direction,
+            default_light().direction
+        );
+        assert!(engine.resources.get::<Assets>().is_some());
+        assert_eq!(engine.render()?.dimensions(), (12, 6));
+        Ok(())
+    }
+
+    #[test]
+    fn from_parts_rejects_zero_size() {
+        let err = Headless::from_parts(World::new(), Resources::new(), Schedule::new(), (4, 0))
+            .err()
+            .expect("zero height must fail");
+        assert!(err.to_string().contains("4x0"), "{err}");
     }
 }
