@@ -21,7 +21,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::ecs::{self, Resources, Schedule, Time, World};
+use crate::ecs::{self, ExitRequest, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 use crate::input::InputState;
 use crate::stats::{FrameStats, frame_stats_system};
@@ -108,6 +108,12 @@ pub trait Game {
     fn cursor_grabbed(&self) -> bool {
         false
     }
+
+    /// Polled once per frame after `render`; `true` closes the window and
+    /// makes [`run`] return `Ok(())`.
+    fn exit_requested(&self) -> bool {
+        false
+    }
 }
 
 /// Draws the world each frame for [`EcsGame`]; called after the frame
@@ -134,6 +140,9 @@ pub type RenderFn =
 /// Frame times go into a [`FrameStats`] resource: [`frame_stats_system`]
 /// runs after every frame system in the schedule, and once per second the
 /// window title becomes `"{title} | {summary}"` (see [`Self::title`]).
+///
+/// Any system can end the app by setting the [`ExitRequest`] resource to
+/// `true`; the window closes after the current frame.
 pub struct EcsGame {
     /// Entities and components.
     pub world: World,
@@ -163,12 +172,14 @@ impl Default for EcsGame {
 
 impl EcsGame {
     /// A game over `world` driven by `schedule`, with default [`Time`],
-    /// [`InputState`] and [`FrameStats`] resources and no render callback.
+    /// [`InputState`] and [`FrameStats`] resources, `ExitRequest(false)`,
+    /// and no render callback.
     pub fn new(world: World, schedule: Schedule) -> Self {
         let mut resources = Resources::new();
         resources.insert(Time::default());
         resources.insert(InputState::default());
         resources.insert(FrameStats::default());
+        resources.insert(ExitRequest(false));
         Self {
             world,
             resources,
@@ -270,6 +281,13 @@ impl Game for EcsGame {
             .get::<InputState>()
             .is_some_and(|input| input.cursor_grabbed)
     }
+
+    /// `true` once a system sets the [`ExitRequest`] resource to `true`.
+    fn exit_requested(&self) -> bool {
+        self.resources
+            .get::<ExitRequest>()
+            .is_some_and(|exit| exit.0)
+    }
 }
 
 /// Result of [`FixedTimestep::advance`].
@@ -326,8 +344,8 @@ impl FixedTimestep {
     }
 }
 
-/// Opens a window and runs `game` until the window is closed or Escape is
-/// pressed.
+/// Opens a window and runs `game` until the window is closed, Escape is
+/// pressed, or [`Game::exit_requested`] returns `true`.
 pub fn run<G: Game + 'static>(config: AppConfig, game: G) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut runner = Runner {
@@ -541,9 +559,15 @@ impl<G: Game> ApplicationHandler for Runner<G> {
                     state.window.request_redraw();
                 }
             }
+            // A redraw already queued when `exit` was called still arrives;
+            // skip it so the game sees no frames after it asked to stop.
+            WindowEvent::RedrawRequested if event_loop.exiting() => {}
             WindowEvent::RedrawRequested => {
                 if let Err(err) = self.frame() {
                     self.fail(event_loop, err);
+                } else if self.game.exit_requested() {
+                    log::info!("exit requested");
+                    event_loop.exit();
                 }
             }
             _ => {}
@@ -720,6 +744,14 @@ mod tests {
         let title = game.title().expect("title after one second");
         let summary = game.resources.expect::<FrameStats>().summary();
         assert_eq!(title, format!("demo | {summary}"));
+    }
+
+    #[test]
+    fn ecs_game_reports_exit_request() {
+        let mut game = EcsGame::default();
+        assert!(!game.exit_requested(), "new games do not request exit");
+        game.resources.insert(ExitRequest(true));
+        assert!(game.exit_requested());
     }
 
     #[test]
