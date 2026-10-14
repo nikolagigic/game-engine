@@ -148,6 +148,69 @@ fn save(path: &Path, image: &RgbaImage) {
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
 }
 
+/// Shared GE-006 scene: one instance of `mesh` at `transform`, viewed from
+/// `(0, 2, 5)` looking at the origin (45° vertical FOV), lit by a white
+/// light travelling along `(1, -2, -1)` (from above-front-left) with 0.1
+/// ambient, over a near-black clear. Renders `size` x `size` pixels
+/// offscreen and reads them back.
+pub fn render_lit_mesh(
+    mesh: &engine::asset::MeshData,
+    transform: engine::math::Transform,
+    color: [f32; 4],
+    size: u32,
+) -> anyhow::Result<RgbaImage> {
+    use engine::gpu::OFFSCREEN_COLOR_FORMAT;
+    use engine::math::{Camera, Projection, Transform, Vec3};
+    use engine::render::{GpuMesh, InstanceRaw, LightUniform, MeshRenderer, begin_mesh_pass};
+
+    let ctx = GpuContext::new(None)?;
+    let target = OffscreenTarget::new(&ctx.device, size, size);
+    let mut renderer = MeshRenderer::new(&ctx.device, OFFSCREEN_COLOR_FORMAT);
+
+    let mut camera = Camera {
+        transform: Transform::from_translation(Vec3::new(0.0, 2.0, 5.0)),
+        projection: Projection::Perspective {
+            fov_y_radians: 45f32.to_radians(),
+            near: 0.1,
+            far: 100.0,
+        },
+    };
+    camera.transform.looking_at(Vec3::ZERO, Vec3::Y);
+    renderer.set_camera(&ctx.queue, &camera, 1.0);
+    renderer.set_light(
+        &ctx.queue,
+        &LightUniform {
+            direction: [1.0, -2.0, -1.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            ambient: [0.1, 0.1, 0.1, 1.0],
+        },
+    );
+
+    let gpu_mesh = GpuMesh::upload(&ctx.device, mesh);
+    let instance = InstanceRaw::from_transform(&transform, color);
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lit mesh encoder"),
+        });
+    {
+        let mut pass = begin_mesh_pass(
+            &mut encoder,
+            &target.color_view,
+            &target.depth_view,
+            wgpu::Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.02,
+                a: 1.0,
+            },
+        );
+        renderer.draw(&ctx.device, &ctx.queue, &mut pass, &gpu_mesh, &[instance]);
+    }
+    ctx.queue.submit([encoder.finish()]);
+    target.read_pixels(&ctx)
+}
+
 /// Clears `target`'s colour to `color` (linear) and depth to 1.0.
 pub fn clear(ctx: &GpuContext, target: &OffscreenTarget, color: wgpu::Color) {
     let mut encoder = ctx
