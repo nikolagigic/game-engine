@@ -10,10 +10,10 @@ the tech lead also pastes your ticket into your brief when needed.
 **Shin Engine**: a small, fast, cross-platform 3D engine that humans,
 scripts, and AI agents all drive through the same API (ADR 0007). Small,
 readable, open source, end-to-end in Rust. The crates.io package is
-`shin-engine`; the library is `shin`, so code reads `use shin::...`. The MVP
-proves one architecture: a wgpu renderer, a winit window, a fixed-timestep
-loop, a hecs ECS, glTF meshes, instanced drawing, and headless golden-image
-tests. Readability beats cleverness. Small public APIs beat flexible ones.
+`shin-engine`; the library is `shin`, so code reads `use shin::...`. Milestones 1 and 2
+are complete: a wgpu renderer, a winit window, a fixed-timestep loop, a
+hecs ECS, glTF meshes, instanced drawing, headless golden-image tests, an
+egui editor, RON scenes, project scaffolding, MCP, and Rhai scripting. Readability beats cleverness. Small public APIs beat flexible ones.
 
 ## Roles
 
@@ -24,8 +24,8 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 
 ## Architecture decisions (summary of the ADRs)
 
-1. **Rust end-to-end.** No scripting layer in milestone 1. Rhai is planned
-   for milestone 2 as the "gameplay without recompiling" layer.
+1. **Rust end-to-end.** Rhai scripts (`shin::script`) are the "gameplay
+   without recompiling" layer; they run only while playing.
 2. **wgpu for all GPU work.** One code path for Metal/Vulkan/DX12/WebGPU.
    Shaders are WGSL, stored as `.wgsl` files next to the Rust that uses them
    and included with `include_str!`.
@@ -68,8 +68,13 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 | `tool`   | `Tool` trait, `ToolRegistry`, `ToolOutput`                 | GE-013, GE-015 |
 | `headless` | window-less engine handle for tools, tests, benchmarks   | GE-013         |
 | `project` | `shin.toml` manifest, `project::create` scaffolding, `project.new` | GE-018 |
-| crate `shin-mcp`   | stdio MCP server over the registry               | GE-014         |
-| crate `shin-cli`   | `shin new <name>` (and later `shin edit`)         | GE-018         |
+| crate `shin-mcp`   | MCP server library + stdio binary; `--project`; calls go through `command::apply` | GE-014, GE-026, GE-027 |
+| `scene`  | `.scene.ron` files: `SceneFile`, `save`/`load`, `scene.save`/`scene.load` | GE-021 |
+| `command` | `History` (undo/redo over tool calls), `Tool::affected`, `history.*` | GE-022 |
+| `headless::play` | `PlayState`, `Headless::play/pause/stop`, `sim.*` tools | GE-024 |
+| `script` | Rhai: `Script` component, `ScriptEngine`, hot reload, `script.*` tools | GE-011 |
+| crate `shin-cli`   | `shin new <name>`, `shin edit <dir>`              | GE-018, GE-020 |
+| crate `shin-editor` | egui editor: panels, viewport, inspector, console, play | GE-020..GE-024 |
 
 Public API surface should stay small. Prefer `pub(crate)` until a ticket
 explicitly asks for a public type.
