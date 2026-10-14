@@ -61,7 +61,10 @@ fn missing_reference_writes_new_png_then_update_recreates() -> anyhow::Result<()
     let message =
         panic_message(|| assert_golden_in(&dir, "clear", &image, GoldenOpts::default(), false));
     let new_png = dir.join("_diff/clear.new.png");
-    assert!(message.contains(&new_png.display().to_string()), "{message}");
+    assert!(
+        message.contains(&new_png.display().to_string()),
+        "{message}"
+    );
     assert!(new_png.exists());
 
     // With the update flag the reference is (re)created and later runs pass.

@@ -63,7 +63,9 @@ pub fn assert_golden_in(
 
     if update {
         std::fs::create_dir_all(dir).expect("create golden dir");
-        actual.save(&reference_path).expect("write golden reference");
+        actual
+            .save(&reference_path)
+            .expect("write golden reference");
         eprintln!("UPDATE_GOLDEN: wrote {}", reference_path.display());
         return;
     }
@@ -123,7 +125,10 @@ fn diff_image(expected: &RgbaImage, actual: &RgbaImage, max_channel_diff: u8) ->
     let diff = RgbaImage::from_fn(actual.width(), actual.height(), |x, y| {
         let e = expected.get_pixel(x, y);
         let a = actual.get_pixel(x, y);
-        let differs = e.0.iter().zip(a.0).any(|(&e, a)| e.abs_diff(a) > max_channel_diff);
+        let differs =
+            e.0.iter()
+                .zip(a.0)
+                .any(|(&e, a)| e.abs_diff(a) > max_channel_diff);
         if differs {
             differing += 1;
             Rgba([255, 0, 0, 255])
