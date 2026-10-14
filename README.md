@@ -46,6 +46,37 @@ in `assets/`. The project depends on the engine's git repository; pass
 `--engine-path <checkout>/crates/shin-engine` to build against a local
 checkout instead. Agents do the same through the `project.new` tool.
 
+## Philosophy
+
+Shin is built on five rules. They describe the code as it is, not a wish list.
+
+1. **The world is ECS.** Every scene object is an entity with plain-struct
+   components. Systems are plain functions run in insertion order by a
+   simple schedule, one list per fixed step and one per frame. No derive
+   macros, no dependency graph, no hidden parallelism.
+2. **Singletons are resources.** Time, input, the camera, the light, the
+   asset cache, and frame stats live in a typed map next to the world. A
+   thing that exists once is simpler as a value than as an entity you have
+   to find. When a game needs several cameras or lights they become
+   components, and not before.
+3. **Tools are the API.** Every capability is a named, schema-described
+   operation on a headless engine. The editor, the MCP server, scripts, and
+   tests all drive the engine through that one surface, and undo is a log
+   of tool calls. Anything the editor can do, an agent can do; anything an
+   agent can do, a test can reproduce.
+4. **Data is plain files.** Scenes are RON you can read and diff, projects
+   are TOML, assets are referenced by path. Nothing needs the editor to
+   produce or understand it.
+5. **Small and explicit over clever.** One engine crate, one module per
+   subsystem, every public item documented, every rendering feature proven
+   by a pixel comparison. When a flexible abstraction and a readable one
+   compete, the readable one wins, because the people and agents working
+   here should be able to hold the whole engine in their head.
+
+Deliberately missing for now, with ECS-shaped answers when needed: scene
+hierarchy, an event system, a parallel schedule, and more than one lit
+pipeline.
+
 ## Status
 
 Pre-alpha. The workspace builds; subsystems land ticket by ticket.
