@@ -37,10 +37,11 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let config = AppConfig {
         title: TITLE.to_string(),
+        // Linear RGB; the sRGB surface encodes it to cornflower blue #6495ED.
         clear_color: wgpu::Color {
-            r: 0.39,
-            g: 0.58,
-            b: 0.93,
+            r: 0.127,
+            g: 0.301,
+            b: 0.846,
             a: 1.0,
         },
         ..Default::default()

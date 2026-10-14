@@ -34,7 +34,8 @@ pub struct AppConfig {
     pub height: u32,
     /// Simulation step in seconds; default `1.0 / 60.0`.
     pub fixed_dt: f64,
-    /// Colour the surface is cleared to at the start of every frame.
+    /// Colour the surface is cleared to at the start of every frame, in
+    /// linear RGB; the sRGB surface encodes it for display.
     pub clear_color: wgpu::Color,
 }
 
