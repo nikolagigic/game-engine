@@ -224,8 +224,7 @@ pub fn create(opts: &NewProjectOptions) -> anyhow::Result<Vec<PathBuf>> {
     for (relative, contents) in files {
         let path = dir.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
         written.push(path);
@@ -352,10 +351,8 @@ mod tests {
 
     /// A fresh, empty-or-missing directory under the system temp dir.
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "shin-project-test-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("shin-project-test-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -437,7 +434,10 @@ mod tests {
         );
         let cargo = fs::read_to_string(dir.join("Cargo.toml"))?;
         assert!(cargo.contains(r#"name = "demo-game""#), "{cargo}");
-        assert!(cargo.contains(&format!(r#"git = "{ENGINE_GIT_URL}""#)), "{cargo}");
+        assert!(
+            cargo.contains(&format!(r#"git = "{ENGINE_GIT_URL}""#)),
+            "{cargo}"
+        );
         fs::remove_dir_all(&dir)?;
         Ok(())
     }
@@ -453,7 +453,10 @@ mod tests {
         assert_eq!(Project::load(&dir)?, project);
 
         let text = fs::read_to_string(dir.join(MANIFEST))?;
-        assert!(text.contains("[project]") && text.contains("[window]"), "{text}");
+        assert!(
+            text.contains("[project]") && text.contains("[window]"),
+            "{text}"
+        );
         fs::remove_dir_all(&dir)?;
         Ok(())
     }

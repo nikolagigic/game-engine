@@ -31,6 +31,21 @@ orbiting on the fixed-timestep simulation, a directional light, and frame
 stats in the window title. Fly with W/A/S/D and E/Q; hold the right mouse
 button to look around; Escape quits.
 
+## Create a project
+
+```sh
+cargo run -p shin-cli -- new my-game --dir ~/games
+cd ~/games/my-game && cargo run
+```
+
+`shin new <name> [--dir <path>] [--engine-path <path>]` writes a runnable
+Cargo project in `<dir>/<name>` (default: the current directory): a
+`shin.toml` with the project name and window settings, a `src/main.rs` that
+draws a lit cube on a ground slab with the fly camera, and the cube's glTF
+in `assets/`. The project depends on the engine's git repository; pass
+`--engine-path <checkout>/crates/shin-engine` to build against a local
+checkout instead. Agents do the same through the `project.new` tool.
+
 ## Status
 
 Pre-alpha. The workspace builds; subsystems land ticket by ticket.
@@ -53,6 +68,7 @@ crates/shin-engine/   the engine library (package `shin-engine`, lib `shin`)
   examples/           runnable demos
   tests/              integration + golden-image tests
 crates/shin-mcp/      MCP server (stdio) over the engine's tool registry
+crates/shin-cli/      the `shin` command-line tool (`shin new`)
 ```
 
 ## Using the engine from an agent
@@ -106,6 +122,7 @@ camera.set            { position?, look_at?, fov_y_deg? }
 light.set             { direction?, color?, ambient? }
 render.frame          { width?, height? }
 stats.summary         {}
+project.new           { name, dir, engine_path? }
 ```
 
 Vectors are JSON arrays (`[x, y, z]`; colours are linear `[r, g, b, a]`),
