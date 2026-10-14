@@ -20,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::ecs::{Resources, Schedule, Time, World};
+use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 use crate::input::InputState;
 
@@ -181,12 +181,7 @@ impl EcsGame {
 
 impl Game for EcsGame {
     fn fixed_update(&mut self, dt: f64) {
-        let time = self.time_mut();
-        time.fixed_dt = dt;
-        time.fixed_steps += 1;
-        time.elapsed += dt;
-        self.schedule
-            .run_fixed(&mut self.world, &mut self.resources);
+        ecs::fixed_step(&mut self.world, &mut self.resources, &mut self.schedule, dt);
     }
 
     fn render(&mut self, ctx: &GpuContext, view: &wgpu::TextureView, alpha: f64) {
