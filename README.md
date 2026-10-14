@@ -1,5 +1,7 @@
 # game-engine
 
+[![CI](https://github.com/nikolagigic/game-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nikolagigic/game-engine/actions/workflows/ci.yml)
+
 A small, readable, open-source 3D game engine written end-to-end in Rust.
 
 The goal is an MVP that proves one architecture, not a feature list:
