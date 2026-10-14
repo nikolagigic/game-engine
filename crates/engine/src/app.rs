@@ -4,6 +4,9 @@
 //! simulation at a fixed `dt` ([`FixedTimestep`]) and renders once per
 //! frame, clearing the surface and depth buffer before calling
 //! [`Game::render`].
+//!
+//! [`EcsGame`] is a ready-made [`Game`] for applications that are "a world
+//! plus systems" (see [`crate::ecs`]).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,6 +19,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::ecs::{Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
@@ -79,6 +83,94 @@ pub trait Game {
     /// Polled once per frame; returning `Some` sets the window title.
     fn title(&self) -> Option<String> {
         None
+    }
+}
+
+/// Draws the world each frame for [`EcsGame`]; called after the frame
+/// systems with the surface view, already cleared.
+pub type RenderFn = Box<dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu::TextureView)>;
+
+/// A [`Game`] that is a [`World`] plus a [`Schedule`] of systems.
+///
+/// The loop keeps the [`Time`] resource up to date: each
+/// [`fixed_update`](Game::fixed_update) advances `Time` by one step and
+/// then runs the schedule's fixed systems; each [`render`](Game::render)
+/// records `frame_dt` and `alpha`, runs the frame systems, and finally
+/// calls [`render_fn`](Self::render_fn) if one is set.
+pub struct EcsGame {
+    /// Entities and components.
+    pub world: World,
+    /// Singletons shared by systems; always contains a [`Time`].
+    pub resources: Resources,
+    /// Systems to run each fixed step and each frame.
+    pub schedule: Schedule,
+    /// Optional drawing callback, run last in every frame.
+    pub render_fn: Option<RenderFn>,
+    last_frame: Option<Instant>,
+}
+
+impl Default for EcsGame {
+    fn default() -> Self {
+        Self::new(World::new(), Schedule::new())
+    }
+}
+
+impl EcsGame {
+    /// A game over `world` driven by `schedule`, with a default [`Time`]
+    /// resource and no render callback.
+    pub fn new(world: World, schedule: Schedule) -> Self {
+        let mut resources = Resources::new();
+        resources.insert(Time::default());
+        Self {
+            world,
+            resources,
+            schedule,
+            render_fn: None,
+            last_frame: None,
+        }
+    }
+
+    /// The [`Time`] resource, re-inserted if user code removed or replaced
+    /// the resource map.
+    fn time_mut(&mut self) -> &mut Time {
+        if self.resources.get::<Time>().is_none() {
+            self.resources.insert(Time::default());
+        }
+        self.resources.expect_mut::<Time>()
+    }
+
+    /// The GPU-independent half of [`Game::render`]: updates `frame_dt`
+    /// and `alpha` in [`Time`], then runs the frame systems.
+    fn begin_frame(&mut self, alpha: f64) {
+        let now = Instant::now();
+        let frame_dt = self
+            .last_frame
+            .map_or(0.0, |last| (now - last).as_secs_f64());
+        self.last_frame = Some(now);
+
+        let time = self.time_mut();
+        time.frame_dt = frame_dt;
+        time.alpha = alpha;
+        self.schedule
+            .run_frame(&mut self.world, &mut self.resources);
+    }
+}
+
+impl Game for EcsGame {
+    fn fixed_update(&mut self, dt: f64) {
+        let time = self.time_mut();
+        time.fixed_dt = dt;
+        time.fixed_steps += 1;
+        time.elapsed += dt;
+        self.schedule
+            .run_fixed(&mut self.world, &mut self.resources);
+    }
+
+    fn render(&mut self, ctx: &GpuContext, view: &wgpu::TextureView, alpha: f64) {
+        self.begin_frame(alpha);
+        if let Some(render_fn) = &mut self.render_fn {
+            render_fn(&mut self.world, &mut self.resources, ctx, view);
+        }
     }
 }
 
@@ -401,6 +493,31 @@ mod tests {
         assert!((r.alpha - 0.5).abs() < 1e-9);
         let r = ts.advance(DT / 2.0);
         assert_eq!(r.steps, 1);
+    }
+
+    fn count_frames(_: &mut World, res: &mut Resources) {
+        *res.expect_mut::<u32>() += 1;
+    }
+
+    #[test]
+    fn ecs_game_frame_updates_time_and_runs_frame_systems() {
+        let mut schedule = Schedule::new();
+        schedule.add_frame("count_frames", count_frames);
+        let mut game = EcsGame::new(World::new(), schedule);
+        game.resources.insert(0_u32);
+
+        game.begin_frame(0.25);
+        let time = *game.resources.expect::<Time>();
+        assert_eq!(time.alpha, 0.25);
+        assert_eq!(time.frame_dt, 0.0, "first frame has no predecessor");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        game.begin_frame(0.5);
+        let time = *game.resources.expect::<Time>();
+        assert_eq!(time.alpha, 0.5);
+        assert!(time.frame_dt >= 0.005, "frame_dt = {}", time.frame_dt);
+        assert_eq!(time.fixed_steps, 0, "frames do not step the simulation");
+        assert_eq!(*game.resources.expect::<u32>(), 2);
     }
 
     #[test]
