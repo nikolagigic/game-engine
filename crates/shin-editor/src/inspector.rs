@@ -1,5 +1,6 @@
 //! The Inspector panel (GE-023): the selected entity's name, transform,
-//! mesh, and colour, editable.
+//! mesh, and colour, editable; and (GE-011) its script path, with the
+//! script's last compile or runtime error.
 //!
 //! The panel keeps its own copy of the values being edited, refreshed from
 //! the world every frame except for the field the user is working on.
@@ -8,12 +9,15 @@
 //! focus. Commits become [`Edit`]s that [`crate::editor::EditorCore`] turns
 //! into tool calls through the command history ([`crate::edit`]).
 
+use std::path::Path;
+
 use egui::{DragValue, Ui};
 use shin::ecs::{Entity, Name};
 use shin::headless::Headless;
 use shin::math::Transform;
 use shin::render::{MeshInstance, RenderState};
 use shin::scene::TransformDesc;
+use shin::script::{Script, ScriptEngine};
 
 use crate::edit::entity_id;
 use crate::ui::Action;
@@ -44,6 +48,8 @@ pub enum Edit {
     },
     /// `entity.set_mesh` with an asset source string.
     Mesh(Entity, String),
+    /// `script.attach` with a `.rhai` path; empty removes the script.
+    Script(Entity, String),
 }
 
 /// The Inspector's edit buffers.
@@ -56,6 +62,7 @@ pub struct Inspector {
     /// `None` when the entity draws no mesh.
     color: Option<[f32; 4]>,
     mesh: String,
+    script: String,
     /// The transform before the preview in progress, if any.
     transform_origin: Option<TransformDesc>,
     /// The colour before the preview in progress, if any.
@@ -65,6 +72,7 @@ pub struct Inspector {
     name_focused: bool,
     transform_focused: bool,
     mesh_focused: bool,
+    script_focused: bool,
 }
 
 /// The values the inspector shows for `entity`, read from the world.
@@ -73,6 +81,10 @@ struct Current {
     transform: Option<TransformDesc>,
     color: Option<[f32; 4]>,
     mesh: String,
+    /// The script path, or empty.
+    script: String,
+    /// The script's last error, as `path:line: message`.
+    script_error: Option<String>,
 }
 
 impl Current {
@@ -85,7 +97,15 @@ impl Current {
                 state.registry.source(i.mesh).map(|s| s.to_string())
             })
             .unwrap_or_default();
+        let script = world.get::<&Script>(entity).ok().map(|s| s.path.clone());
+        let script_error = script
+            .as_deref()
+            .and_then(|path| script_error(engine, path));
         Self {
+            script: script
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            script_error,
             name: world
                 .get::<&Name>(entity)
                 .map(|n| n.0.clone())
@@ -98,6 +118,13 @@ impl Current {
             mesh,
         }
     }
+}
+
+/// The latest error of the script at `path` (as written in its
+/// [`Script`]), formatted `path:line: message`, if it has one.
+pub fn script_error(engine: &Headless, path: &Path) -> Option<String> {
+    let scripts = engine.resources.get::<ScriptEngine>()?;
+    scripts.error(path).map(ToString::to_string)
 }
 
 impl Inspector {
@@ -148,7 +175,8 @@ impl Inspector {
             ui.weak("Select an entity");
             return;
         };
-        self.refresh(&Current::read(engine, entity));
+        let current = Current::read(engine, entity);
+        self.refresh(&current);
 
         ui.label(format!("Entity #{}", entity_id(entity)));
         egui::Grid::new("inspector_grid")
@@ -159,7 +187,11 @@ impl Inspector {
                 self.transform_rows(ui, entity, actions);
                 self.mesh_row(ui, engine, entity, actions);
                 self.color_row(ui, entity, actions);
+                self.script_row(ui, entity, &current, actions);
             });
+        if let Some(error) = &current.script_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
 
         // A drag or colour pick ends when the pointer is released; a typed
         // number ends when its field loses focus.
@@ -186,6 +218,32 @@ impl Inspector {
         if !self.mesh_focused {
             self.mesh.clone_from(&current.mesh);
         }
+        if !self.script_focused {
+            self.script.clone_from(&current.script);
+        }
+    }
+
+    /// The script path field: commits on Enter or when it loses focus, if
+    /// the path changed. Clearing it removes the script.
+    fn script_row(
+        &mut self,
+        ui: &mut Ui,
+        entity: Entity,
+        current: &Current,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.label("Script");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.script)
+                .hint_text("scripts/name.rhai")
+                .desired_width(160.0),
+        );
+        let path = self.script.trim();
+        if response.lost_focus() && path != current.script {
+            actions.push(Action::Edit(Edit::Script(entity, path.to_string())));
+        }
+        self.script_focused = response.has_focus();
+        ui.end_row();
     }
 
     fn name_row(&mut self, ui: &mut Ui, entity: Entity, actions: &mut Vec<Action>) {

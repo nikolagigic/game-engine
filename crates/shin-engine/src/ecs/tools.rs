@@ -19,6 +19,7 @@ use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
+use crate::script::Script;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers the entity tools, `scene.clear`, and `sim.step`.
@@ -36,7 +37,7 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
-         (Euler degrees, XYZ), scale, name if it has one, and mesh, colour, and texture \
+         (Euler degrees, XYZ), scale, name and script path if it has them, and mesh, colour, and texture \
          (a handle or null) if the entity draws one.",
         entity_list,
     ));
@@ -184,13 +185,22 @@ fn default_limit() -> usize {
 fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutput> {
     let mut rows: Vec<(u64, Value)> = engine
         .world
-        .query::<(Entity, &Transform, Option<&MeshInstance>, Option<&Name>)>()
+        .query::<(
+            Entity,
+            &Transform,
+            Option<&MeshInstance>,
+            Option<&Name>,
+            Option<&Script>,
+        )>()
         .iter()
-        .map(|(entity, transform, instance, name)| {
+        .map(|(entity, transform, instance, name, script)| {
             let mut row = transform_json(transform);
             row["entity"] = json!(entity_id(entity));
             if let Some(Name(name)) = name {
                 row["name"] = json!(name);
+            }
+            if let Some(script) = script {
+                row["script"] = json!(script.path.to_string_lossy());
             }
             if let Some(instance) = instance {
                 row["mesh"] = json!(instance.mesh.0);

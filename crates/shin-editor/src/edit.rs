@@ -150,6 +150,25 @@ pub fn commit_mesh(
     Ok(())
 }
 
+/// Attaches the Rhai script at `path` (relative to the project directory)
+/// to `entity`, or removes its script when `path` is empty, with one
+/// recorded `script.attach`. Returns the compile error, if any; the script
+/// is attached either way, so it runs once the file is fixed.
+pub fn commit_script(
+    reg: &ToolRegistry,
+    engine: &mut Headless,
+    entity: Entity,
+    path: &str,
+) -> anyhow::Result<Option<String>> {
+    let out = apply(
+        reg,
+        engine,
+        "script.attach",
+        json!({ "entity": entity_id(entity), "path": path }),
+    )?;
+    Ok(out["error"].as_str().map(str::to_string))
+}
+
 /// Writes `desc` into `entity`'s [`Transform`] without recording it.
 /// Does nothing if the entity has no transform.
 pub fn preview_transform(engine: &mut Headless, entity: Entity, desc: &TransformDesc) {
