@@ -188,6 +188,7 @@ pub fn render_lit_mesh(
 
     let gpu_mesh = GpuMesh::upload(&ctx.device, mesh);
     let instance = InstanceRaw::from_transform(&transform, color);
+    renderer.upload_instances(&ctx.device, &ctx.queue, &[instance]);
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -205,7 +206,7 @@ pub fn render_lit_mesh(
                 a: 1.0,
             },
         );
-        renderer.draw(&ctx.device, &ctx.queue, &mut pass, &gpu_mesh, &[instance]);
+        renderer.draw(&mut pass, &gpu_mesh, 0..1);
     }
     ctx.queue.submit([encoder.finish()]);
     target.read_pixels(&ctx)

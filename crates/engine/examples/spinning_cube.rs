@@ -5,13 +5,12 @@
 //! Run with `cargo run --example spinning_cube` (add `RUST_LOG=wgpu=warn`
 //! to see any wgpu warnings).
 //!
-//! `Game::render` only receives the colour view, so the example reads the
-//! size and format from `view.texture()` and owns its own depth texture,
-//! recreated when the window size changes.
+//! The renderer is created on the first frame, once the surface format is
+//! known (`view.texture().format()`); the depth view comes from the loop.
 
 use engine::app::{self, AppConfig, Game};
 use engine::asset;
-use engine::gpu::{DEPTH_FORMAT, GpuContext};
+use engine::gpu::GpuContext;
 use engine::math::{Camera, Projection, Quat, Transform, Vec3};
 use engine::render::{GpuMesh, InstanceRaw, LightUniform, MeshRenderer, begin_mesh_pass};
 
@@ -31,8 +30,6 @@ const CLEAR: wgpu::Color = wgpu::Color {
 struct Gpu {
     renderer: MeshRenderer,
     mesh: GpuMesh,
-    /// Depth texture view and the size it was created for.
-    depth: Option<(wgpu::TextureView, (u32, u32))>,
 }
 
 struct SpinningCube {
@@ -63,36 +60,20 @@ impl SpinningCube {
     }
 }
 
-/// A depth view matching a `width` x `height` colour target.
-fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("spinning_cube depth"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
-}
-
 impl Game for SpinningCube {
     fn fixed_update(&mut self, dt: f64) {
         self.previous_angle = self.angle;
         self.angle += SPIN_SPEED * dt;
     }
 
-    fn render(&mut self, ctx: &GpuContext, view: &wgpu::TextureView, alpha: f64) {
+    fn render(
+        &mut self,
+        ctx: &GpuContext,
+        view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        alpha: f64,
+    ) {
         let texture = view.texture();
-        let size = (texture.width(), texture.height());
-
         let gpu = self.gpu.get_or_insert_with(|| {
             let renderer = MeshRenderer::new(&ctx.device, texture.format());
             renderer.set_light(
@@ -106,22 +87,17 @@ impl Game for SpinningCube {
             Gpu {
                 renderer,
                 mesh: GpuMesh::upload(&ctx.device, &asset::cube()),
-                depth: None,
             }
         });
-        if gpu.depth.as_ref().is_none_or(|(_, s)| *s != size) {
-            gpu.depth = Some((create_depth_view(&ctx.device, size.0, size.1), size));
-        }
-        let Some((depth_view, _)) = &gpu.depth else {
-            return;
-        };
 
-        gpu.renderer
-            .set_camera(&ctx.queue, &self.camera, size.0 as f32 / size.1 as f32);
+        let aspect = texture.width() as f32 / texture.height() as f32;
+        gpu.renderer.set_camera(&ctx.queue, &self.camera, aspect);
         let angle = self.previous_angle + (self.angle - self.previous_angle) * alpha;
         let transform =
             Transform::from_trs(Vec3::ZERO, Quat::from_rotation_y(angle as f32), Vec3::ONE);
         let instance = InstanceRaw::from_transform(&transform, CUBE_COLOR);
+        gpu.renderer
+            .upload_instances(&ctx.device, &ctx.queue, &[instance]);
 
         let mut encoder = ctx
             .device
@@ -129,9 +105,8 @@ impl Game for SpinningCube {
                 label: Some("spinning_cube encoder"),
             });
         {
-            let mut pass = begin_mesh_pass(&mut encoder, view, depth_view, CLEAR);
-            gpu.renderer
-                .draw(&ctx.device, &ctx.queue, &mut pass, &gpu.mesh, &[instance]);
+            let mut pass = begin_mesh_pass(&mut encoder, view, depth, CLEAR);
+            gpu.renderer.draw(&mut pass, &gpu.mesh, 0..1);
         }
         ctx.queue.submit([encoder.finish()]);
     }

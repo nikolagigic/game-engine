@@ -31,7 +31,7 @@ pub struct Headless {
     /// Default black.
     pub clear_color: wgpu::Color,
     /// Optional drawing callback, called by [`Self::render`] after the
-    /// clear with the target's colour view. GE-015 installs the renderer
+    /// clear with the target's colour and depth views. GE-015 installs the renderer
     /// here; with none installed a render is just the clear.
     pub render_fn: Option<RenderFn>,
 }
@@ -111,6 +111,7 @@ impl Headless {
                 &mut self.resources,
                 &self.gpu,
                 &self.target.color_view,
+                &self.target.depth_view,
             );
         }
         self.target.read_pixels(&self.gpu)
@@ -189,7 +190,7 @@ mod tests {
     fn render_runs_frame_systems_and_render_fn() -> anyhow::Result<()> {
         let mut engine = Headless::new(4, 4)?;
         engine.schedule.add_frame("mark_frame", mark_frame);
-        engine.render_fn = Some(Box::new(|_, res, _, _| res.insert(7_u8)));
+        engine.render_fn = Some(Box::new(|_, res, _, _, _| res.insert(7_u8)));
         engine.render()?;
         assert_eq!(engine.resources.get::<bool>(), Some(&true));
         assert_eq!(engine.resources.get::<u8>(), Some(&7));

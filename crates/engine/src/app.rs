@@ -70,11 +70,19 @@ pub trait Game {
         let _ = dt;
     }
 
-    /// Once per frame, after the surface has been cleared. `alpha` in 0..1
-    /// is the fraction of a fixed step left in the accumulator, for
-    /// interpolating between the last two simulation states.
-    fn render(&mut self, ctx: &GpuContext, view: &wgpu::TextureView, alpha: f64) {
-        let _ = (ctx, view, alpha);
+    /// Once per frame, after the surface (`view`) and its matching depth
+    /// buffer (`depth`, [`crate::gpu::DEPTH_FORMAT`]) have been cleared.
+    /// `alpha` in 0..1 is the fraction of a fixed step left in the
+    /// accumulator, for interpolating between the last two simulation
+    /// states.
+    fn render(
+        &mut self,
+        ctx: &GpuContext,
+        view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        alpha: f64,
+    ) {
+        let _ = (ctx, view, depth, alpha);
     }
 
     /// Every window event, before the engine handles it.
@@ -101,8 +109,13 @@ pub trait Game {
 }
 
 /// Draws the world each frame for [`EcsGame`]; called after the frame
-/// systems with the surface view, already cleared.
-pub type RenderFn = Box<dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu::TextureView)>;
+/// systems with the colour view and the matching depth view, both already
+/// cleared. Arguments: `(world, resources, ctx, color_view, depth_view)`.
+///
+/// To draw [`crate::render::MeshInstance`] entities, call
+/// [`crate::render::render_world`] from here.
+pub type RenderFn =
+    Box<dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu::TextureView, &wgpu::TextureView)>;
 
 /// A [`Game`] that is a [`World`] plus a [`Schedule`] of systems.
 ///
@@ -184,10 +197,16 @@ impl Game for EcsGame {
         ecs::fixed_step(&mut self.world, &mut self.resources, &mut self.schedule, dt);
     }
 
-    fn render(&mut self, ctx: &GpuContext, view: &wgpu::TextureView, alpha: f64) {
+    fn render(
+        &mut self,
+        ctx: &GpuContext,
+        view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        alpha: f64,
+    ) {
         self.begin_frame(alpha);
         if let Some(render_fn) = &mut self.render_fn {
-            render_fn(&mut self.world, &mut self.resources, ctx, view);
+            render_fn(&mut self.world, &mut self.resources, ctx, view, depth);
         }
     }
 
@@ -421,7 +440,8 @@ impl<G: Game> Runner<G> {
             &state.target.depth_view,
             self.config.clear_color,
         );
-        self.game.render(&state.gpu, &view, step.alpha);
+        self.game
+            .render(&state.gpu, &view, &state.target.depth_view, step.alpha);
 
         state.window.pre_present_notify();
         state.gpu.queue.present(surface_texture);

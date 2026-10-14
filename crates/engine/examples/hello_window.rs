@@ -20,7 +20,13 @@ impl Game for HelloWindow {
         self.updates += 1;
     }
 
-    fn render(&mut self, _ctx: &engine::gpu::GpuContext, _view: &wgpu::TextureView, _alpha: f64) {
+    fn render(
+        &mut self,
+        _ctx: &engine::gpu::GpuContext,
+        _view: &wgpu::TextureView,
+        _depth: &wgpu::TextureView,
+        _alpha: f64,
+    ) {
         if self.window_start.elapsed() >= Duration::from_secs(1) {
             self.title = format!("{TITLE} - {} fixed updates/s", self.updates);
             self.updates = 0;
