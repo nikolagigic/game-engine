@@ -696,8 +696,10 @@ mod tests {
 
     #[test]
     fn ecs_game_records_frame_stats_after_frame_systems() {
-        let mut game = EcsGame::default();
-        game.title = "demo".to_string();
+        let mut game = EcsGame {
+            title: "demo".to_string(),
+            ..Default::default()
+        };
         assert!(game.resources.get::<FrameStats>().is_some());
 
         game.begin_frame(0.0);

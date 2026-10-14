@@ -143,5 +143,6 @@ fn main() -> anyhow::Result<()> {
         clear_color: CLEAR,
         ..Default::default()
     };
+    game.title = config.title.clone();
     app::run(config, game)
 }
