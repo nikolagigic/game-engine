@@ -1,0 +1,110 @@
+# GE-010: continuous integration. Each job runs one item of the definition of
+# done in CLAUDE.md, using the same cargo aliases developers run locally
+# (`check-all` and `test-all` live in `.cargo/config.toml`).
+#
+# The Rust toolchain comes from `rust-toolchain.toml`; `rustup toolchain
+# install` with no arguments installs exactly that version and its components.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI builds from scratch; incremental artefacts only bloat the cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-lint-
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check-all
+        run: cargo check-all
+
+  test-linux:
+    name: test (Linux, lavapipe)
+    runs-on: ubuntu-latest
+    env:
+      # No GPU on the runner: Mesa's lavapipe is a software Vulkan driver.
+      # `GpuContext` reads this through `InstanceDescriptor::*_from_env`, so
+      # wgpu only considers Vulkan and the golden tests run (not skipped).
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+      - name: Show Vulkan devices
+        run: vulkaninfo --summary
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-
+      - name: cargo test-all
+        run: cargo test-all
+
+  test-macos:
+    name: test (macOS, Metal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-
+      - name: cargo test-all
+        run: cargo test-all
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-docs-
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps
