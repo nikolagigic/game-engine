@@ -132,6 +132,11 @@ impl Time {
     }
 }
 
+/// Component: a human-readable entity name, shown by `entity.list` and
+/// saved in scene files. Names need not be unique.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Name(pub String);
+
 /// Set to `ExitRequest(true)` from any system to close the window and make
 /// [`crate::app::run`] return `Ok(())` after the current frame.
 /// [`crate::app::EcsGame`] inserts `ExitRequest(false)` and reports it
