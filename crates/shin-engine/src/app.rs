@@ -122,6 +122,15 @@ pub trait Game {
     fn exit_requested(&self) -> bool {
         false
     }
+
+    /// Whether the game uses Escape itself. By default (`false`) pressing
+    /// Escape closes the window; a game returning `true` (the editor, where
+    /// Escape clears the selection) still sees the key in
+    /// [`on_window_event`](Self::on_window_event) and quits through
+    /// [`exit_requested`](Self::exit_requested) instead.
+    fn handles_escape(&self) -> bool {
+        false
+    }
 }
 
 /// Draws the world each frame for [`EcsGame`]; called after the frame
@@ -353,7 +362,8 @@ impl FixedTimestep {
 }
 
 /// Opens a window and runs `game` until the window is closed, Escape is
-/// pressed, or [`Game::exit_requested`] returns `true`.
+/// pressed (unless [`Game::handles_escape`]), or [`Game::exit_requested`]
+/// returns `true`.
 pub fn run<G: Game + 'static>(config: AppConfig, game: G) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut runner = Runner {
@@ -550,8 +560,8 @@ impl<G: Game> ApplicationHandler for Runner<G> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         self.game.on_window_event(&event);
         match event {
-            WindowEvent::CloseRequested
-            | WindowEvent::KeyboardInput {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         logical_key: Key::Named(NamedKey::Escape),
@@ -559,7 +569,7 @@ impl<G: Game> ApplicationHandler for Runner<G> {
                         ..
                     },
                 ..
-            } => event_loop.exit(),
+            } if !self.game.handles_escape() => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state

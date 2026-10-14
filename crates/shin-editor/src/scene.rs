@@ -1,12 +1,10 @@
-//! The scene the editor shows until scene files exist (GE-021): the same
-//! lit cube on a ground slab that `shin new` generates, built in code.
+//! Opening the project's scene in the editor's engine and the paths File >
+//! Open and Save use.
 
 use std::path::Path;
 
-use shin::asset::{AssetSource, Assets};
 use shin::headless::Headless;
-use shin::math::{Camera, Projection, Quat, Transform, Vec3};
-use shin::render::{LightUniform, MeshInstance, RenderState};
+use shin::project::{Project, STARTER_SCENE};
 
 /// Linear clear colour of the viewport: the starter game's dusky sky blue.
 pub const SKY: wgpu::Color = wgpu::Color {
@@ -16,74 +14,21 @@ pub const SKY: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-/// The project's cube mesh, relative to the project directory.
-const CUBE: &str = "assets/cube.gltf";
-
-/// Sets up `engine` with the starter scene of the project in
-/// `project_dir`: the [`SKY`] clear colour, a directional light, an
-/// [`Assets`] cache rooted at the project, a perspective [`Camera`], a
-/// ground slab, and a cube resting on it.
-///
-/// The cube mesh is the project's `assets/cube.gltf`; if that does not load,
-/// the built-in cube is used and a warning is logged.
-pub fn build(engine: &mut Headless, project_dir: &Path) -> anyhow::Result<()> {
+/// Opens the project in `project_dir` on `engine` ([`Headless::load_project`]:
+/// assets and scene paths rooted at the project, its entry scene loaded if
+/// it has one) with the [`SKY`] clear colour, and returns its manifest.
+pub fn open(engine: &mut Headless, project_dir: &Path) -> anyhow::Result<Project> {
     engine.clear_color = SKY;
-    let gpu = &engine.gpu;
-    let state = engine.resources.expect_mut::<RenderState>();
-    state.light = LightUniform {
-        direction: [-0.6, -1.0, -0.4, 0.0],
-        color: [1.0, 0.95, 0.85, 1.0],
-        ambient: [0.12, 0.13, 0.16, 1.0],
-    };
-    let mut assets = Assets::new(project_dir.to_path_buf());
-    let cube = match assets.mesh(&gpu.device, &mut state.registry, &AssetSource::parse(CUBE)?) {
-        Ok(handle) => handle,
-        Err(err) => {
-            log::warn!("{CUBE} did not load ({err:#}); using the built-in cube");
-            assets.mesh(
-                &gpu.device,
-                &mut state.registry,
-                &AssetSource::Builtin("cube".to_string()),
-            )?
-        }
-    };
-    let res = &mut engine.resources;
-    res.insert(assets);
-    res.insert(Camera {
-        transform: Transform::IDENTITY,
-        projection: Projection::Perspective {
-            fov_y_radians: 60f32.to_radians(),
-            near: 0.1,
-            far: 500.0,
-        },
-    });
+    engine.load_project(project_dir)
+}
 
-    let world = &mut engine.world;
-    // Ground: the cube flattened into a slab whose top face is y = 0.
-    world.spawn((
-        Transform::from_trs(
-            Vec3::new(0.0, -0.25, 0.0),
-            Quat::IDENTITY,
-            Vec3::new(20.0, 0.5, 20.0),
-        ),
-        MeshInstance {
-            mesh: cube,
-            color: [0.18, 0.2, 0.17, 1.0],
-            texture: None,
-        },
-    ));
-    // The cube, turned a little so the light catches three faces.
-    world.spawn((
-        Transform::from_trs(
-            Vec3::new(0.0, 0.5, 0.0),
-            Quat::from_rotation_y(30f32.to_radians()),
-            Vec3::ONE,
-        ),
-        MeshInstance {
-            mesh: cube,
-            color: [0.8, 0.25, 0.1, 1.0],
-            texture: None,
-        },
-    ));
-    Ok(())
+/// The scene file File > Open loads and File > Save writes at first,
+/// relative to the project: its `entry_scene`, or [`STARTER_SCENE`] when it
+/// has none.
+pub fn default_path(project: &Project) -> String {
+    project
+        .entry_scene
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| STARTER_SCENE.to_string())
 }

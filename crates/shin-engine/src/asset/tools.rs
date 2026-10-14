@@ -50,7 +50,7 @@ pub fn register_tools(reg: &mut ToolRegistry) {
 ///
 /// [`crate::ecs::Resources`] hands out one mutable borrow at a time, so the
 /// `Assets` value is moved out for the call and put back afterwards.
-fn with_assets<R>(
+pub(crate) fn with_assets<R>(
     engine: &mut Headless,
     f: impl FnOnce(&mut Assets, &GpuContext, &mut RenderState) -> R,
 ) -> anyhow::Result<R> {

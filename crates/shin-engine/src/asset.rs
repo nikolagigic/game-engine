@@ -33,6 +33,7 @@ use crate::math::Transform;
 
 pub use registry::{AssetSource, Assets};
 pub use tools::register_tools;
+pub(crate) use tools::with_assets;
 
 /// One mesh vertex as the renderer consumes it.
 #[repr(C)]

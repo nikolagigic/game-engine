@@ -1,12 +1,16 @@
-//! The editor's UI: File and Edit menus above an `egui_dock` area with six
-//! panels: Viewport (centre), Scene (left), Inspector and History (right),
-//! and Log and Console (below the viewport).
+//! The editor's UI: File, Edit, and View menus above an `egui_dock` area
+//! with six panels: Viewport (centre), Scene (left), Inspector and History
+//! (right), and Log and Console (below the viewport).
 //!
 //! The Viewport shows the scene texture and turns pointer input into
-//! orbit-camera moves. Edits are not made here: the UI pushes [`Action`]s
-//! (undo, redo, a console line) that [`crate::editor::EditorCore`] runs
-//! after the UI pass. Ctrl+Z (Cmd+Z on macOS) undoes and Ctrl+Shift+Z
-//! redoes, except while the console input holds text.
+//! orbit-camera moves. The Scene panel lists entities (click to select) and
+//! adds and deletes them; the Inspector ([`crate::inspector`]) edits the
+//! selected one. Edits are not made here: the UI pushes [`Action`]s that
+//! [`crate::editor::EditorCore`] runs after the UI pass.
+//!
+//! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
+//! undoes and Ctrl+Shift+Z redoes (also in an empty console), Delete or
+//! Backspace deletes the selected entity, and Escape clears the selection.
 
 use egui::{
     Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, TextureId, Ui,
@@ -15,9 +19,13 @@ use egui::{
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use serde_json::Value;
 use shin::command::History;
+use shin::ecs::{Entity, Name};
 use shin::headless::Headless;
-use shin::math::Vec2;
+use shin::math::{Transform, Vec2};
+use shin::scene::TransformDesc;
 
+use crate::edit::entity_id;
+use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
 
@@ -38,9 +46,28 @@ pub enum Tab {
     Console,
 }
 
+/// The panels the View menu can hide and show; the Viewport always stays.
+pub const CLOSEABLE_TABS: [Tab; 5] = [
+    Tab::Scene,
+    Tab::Inspector,
+    Tab::History,
+    Tab::Log,
+    Tab::Console,
+];
+
+/// The selected entity, if any (one at a time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Selection(pub Option<Entity>);
+
+/// The built-in meshes the Scene panel's "+ Cube" and "+ Sphere" add.
+pub const ADD_BUTTONS: [(&str, &str); 2] = [
+    ("+ Cube", "builtin://cube"),
+    ("+ Sphere", "builtin://sphere"),
+];
+
 /// Something the UI asks [`crate::editor::EditorCore`] to do after the UI
 /// pass, when the engine can be borrowed mutably.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Undo the most recent edit.
     Undo,
@@ -48,6 +75,25 @@ pub enum Action {
     Redo,
     /// Run a console line.
     Console(String),
+    /// Add an entity drawing the mesh at this asset source at the orbit
+    /// target, and select it.
+    Spawn(String),
+    /// Delete this entity.
+    Despawn(Entity),
+    /// Show this transform on the entity without recording it (a drag in
+    /// progress).
+    PreviewTransform(Entity, TransformDesc),
+    /// Show this colour on the entity without recording it.
+    PreviewColor(Entity, [f32; 4]),
+    /// Record an inspector change.
+    Edit(Edit),
+    /// File > Open: load the project's entry scene.
+    Open,
+    /// File > Save: save to the current scene path.
+    Save,
+    /// File > Save As: save to this project-relative path and make it the
+    /// current one.
+    SaveAs(String),
 }
 
 /// The Console panel's state: the line being typed and past lines with
@@ -115,6 +161,16 @@ pub struct Viewport {
     pub size_px: [u32; 2],
 }
 
+/// Text typed into fields that outlive one frame: the Scene panel's asset
+/// source and File > Save As path.
+#[derive(Debug, Default)]
+pub struct Fields {
+    /// The asset source "+ From asset" adds, e.g. `assets/cube.gltf#0`.
+    pub asset_source: String,
+    /// The path Save As writes, relative to the project.
+    pub save_as: String,
+}
+
 /// Everything the panels read or change during one UI pass.
 pub struct EditorUi<'a> {
     /// The engine whose world the Scene panel lists and whose command
@@ -128,6 +184,15 @@ pub struct EditorUi<'a> {
     pub viewport: &'a mut Viewport,
     /// The Console panel's input and transcript.
     pub console: &'a mut Console,
+    /// The selected entity.
+    pub selection: &'a mut Selection,
+    /// The Inspector's edit buffers.
+    pub inspector: &'a mut Inspector,
+    /// Text fields of the Scene panel and File menu.
+    pub fields: &'a mut Fields,
+    /// The scene file Save writes, relative to the project; shown in the
+    /// File menu.
+    pub scene_path: &'a str,
     /// What to run after the UI pass.
     pub actions: &'a mut Vec<Action>,
     /// Set when File > Quit is clicked.
@@ -150,11 +215,7 @@ impl EditorUi<'_> {
         let can_redo = history.is_some_and(|h| h.redo_len() > 0);
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Quit").clicked() {
-                        *self.quit = true;
-                    }
-                });
+                ui.menu_button("File", |ui| self.file_menu(ui));
                 ui.menu_button("Edit", |ui| {
                     let undo =
                         egui::Button::new("Undo").shortcut_text(ui.ctx().format_shortcut(&UNDO));
@@ -167,6 +228,7 @@ impl EditorUi<'_> {
                         self.actions.push(Action::Redo);
                     }
                 });
+                ui.menu_button("View", |ui| view_menu(ui, dock));
             });
         });
         egui::CentralPanel::default()
@@ -174,19 +236,70 @@ impl EditorUi<'_> {
             .show(ui, |ui| {
                 DockArea::new(dock)
                     .style(Style::from_egui(ui.style()))
-                    .show_close_buttons(false)
+                    .show_close_buttons(true)
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, self);
             });
     }
 
-    /// Undo and redo shortcuts. They are left to the text field while one
-    /// has focus and holds text, so typing in the console keeps its own
+    /// File > Open, Save, Save As, Quit.
+    fn file_menu(&mut self, ui: &mut Ui) {
+        if ui
+            .button("Open")
+            .on_hover_text("Load the project's entry scene")
+            .clicked()
+        {
+            self.actions.push(Action::Open);
+            ui.close();
+        }
+        if ui
+            .button("Save")
+            .on_hover_text(format!("Save to {}", self.scene_path))
+            .clicked()
+        {
+            self.actions.push(Action::Save);
+            ui.close();
+        }
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.fields.save_as)
+                    .hint_text("scenes/other.scene.ron")
+                    .desired_width(180.0),
+            );
+            let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let path = self.fields.save_as.trim().to_string();
+            if (ui.button("Save As").clicked() || submitted) && !path.is_empty() {
+                self.actions.push(Action::SaveAs(path));
+                ui.close();
+            }
+        });
+        ui.separator();
+        if ui.button("Quit").clicked() {
+            *self.quit = true;
+        }
+    }
+
+    /// Keyboard shortcuts. Undo and redo are left to the text field while
+    /// one has focus and holds text, so typing in the console keeps its own
     /// text undo; in an empty console (right after running a line) they
-    /// undo and redo edits.
+    /// undo and redo edits. Delete and Escape act only when no text field
+    /// has focus.
     fn shortcuts(&mut self, ui: &mut Ui) {
-        if ui.ctx().egui_wants_keyboard_input() && !self.console.input.is_empty() {
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing {
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.selection.0 = None;
+            }
+            let delete = ui.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace)
+            });
+            if delete && let Some(entity) = self.selection.0 {
+                self.actions.push(Action::Despawn(entity));
+            }
+        }
+        if typing && !self.console.input.is_empty() {
             return;
         }
         // Redo first: consuming Ctrl+Z would also match Ctrl+Shift+Z.
@@ -228,9 +341,54 @@ impl EditorUi<'_> {
         }
     }
 
-    fn scene_ui(&self, ui: &mut Ui) {
-        for entity in self.engine.world.iter() {
-            ui.label(format!("Entity {}", entity.entity().id()));
+    /// Add and Delete buttons above the list of entities that have a
+    /// transform, in id order; clicking one selects it.
+    fn scene_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            for (label, source) in ADD_BUTTONS {
+                if ui.button(label).clicked() {
+                    self.actions.push(Action::Spawn(source.to_string()));
+                }
+            }
+            let selected = self.selection.0;
+            if ui
+                .add_enabled(selected.is_some(), egui::Button::new("Delete"))
+                .clicked()
+                && let Some(entity) = selected
+            {
+                self.actions.push(Action::Despawn(entity));
+            }
+        });
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.fields.asset_source)
+                    .hint_text("assets/x.gltf#0")
+                    .desired_width(110.0),
+            );
+            let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let source = self.fields.asset_source.trim().to_string();
+            if (ui.button("+ From asset").clicked() || submitted) && !source.is_empty() {
+                self.actions.push(Action::Spawn(source));
+            }
+        });
+        ui.separator();
+
+        let mut rows: Vec<(Entity, String)> = self
+            .engine
+            .world
+            .query::<(Entity, &Transform, Option<&Name>)>()
+            .iter()
+            .map(|(entity, _, name)| (entity, entity_label(entity, name)))
+            .collect();
+        rows.sort_by_key(|(entity, _)| entity_id(*entity));
+        if rows.is_empty() {
+            ui.weak("No entities");
+        }
+        for (entity, label) in rows {
+            let selected = self.selection.0 == Some(entity);
+            if ui.selectable_label(selected, label).clicked() {
+                self.selection.0 = Some(entity);
+            }
         }
     }
 
@@ -319,7 +477,8 @@ impl TabViewer for EditorUi<'_> {
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Scene => self.scene_ui(ui),
             Tab::Inspector => {
-                ui.label("Select an entity");
+                self.inspector
+                    .ui(ui, self.engine, self.selection.0, self.actions);
             }
             Tab::Log => self.log_ui(ui),
             Tab::History => self.history_ui(ui),
@@ -327,9 +486,10 @@ impl TabViewer for EditorUi<'_> {
         }
     }
 
-    /// No panel can be closed: there is no menu to bring one back yet.
-    fn is_closeable(&self, _tab: &Tab) -> bool {
-        false
+    /// Every panel but the Viewport can be closed; the View menu brings
+    /// it back.
+    fn is_closeable(&self, tab: &Tab) -> bool {
+        *tab != Tab::Viewport
     }
 
     /// The viewport fills its panel exactly (scroll bars would let it grow
@@ -339,6 +499,49 @@ impl TabViewer for EditorUi<'_> {
         match tab {
             Tab::Viewport | Tab::Log | Tab::Console => [false, false],
             Tab::Scene | Tab::Inspector | Tab::History => [true, true],
+        }
+    }
+}
+
+/// How the Scene panel names an entity: its [`Name`], or `#<id>` (the id
+/// tools use) when it has none or the name is empty.
+pub fn entity_label(entity: Entity, name: Option<&Name>) -> String {
+    match name {
+        Some(Name(name)) if !name.is_empty() => name.clone(),
+        _ => format!("#{}", entity_id(entity)),
+    }
+}
+
+/// View: one checkbox per closeable panel; unchecking closes it, checking
+/// docks it again ([`reopen`]).
+fn view_menu(ui: &mut Ui, dock: &mut DockState<Tab>) {
+    for tab in CLOSEABLE_TABS {
+        let found = dock.find_tab(&tab);
+        let mut open = found.is_some();
+        if ui.checkbox(&mut open, format!("{tab:?}")).changed() {
+            match found {
+                Some(path) => {
+                    dock.remove_tab(path);
+                }
+                None => reopen(dock, tab),
+            }
+        }
+    }
+}
+
+/// Docks `tab` again against the window edge [`default_layout`] gives it.
+fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
+    let surface = dock.main_surface_mut();
+    let root = NodeIndex::root();
+    match tab {
+        Tab::Scene => {
+            surface.split_left(root, 0.18, vec![tab]);
+        }
+        Tab::Inspector | Tab::History => {
+            surface.split_right(root, 0.78, vec![tab]);
+        }
+        Tab::Log | Tab::Console | Tab::Viewport => {
+            surface.split_below(root, 0.75, vec![tab]);
         }
     }
 }
@@ -360,6 +563,32 @@ mod tests {
         ] {
             assert!(dock.find_tab(&tab).is_some(), "{tab:?} is docked");
         }
+    }
+
+    #[test]
+    fn view_menu_closes_and_reopens_panels() {
+        let mut dock = default_layout();
+        for tab in CLOSEABLE_TABS {
+            let path = dock.find_tab(&tab).expect("docked");
+            dock.remove_tab(path);
+            assert!(dock.find_tab(&tab).is_none());
+            reopen(&mut dock, tab);
+            assert!(dock.find_tab(&tab).is_some(), "{tab:?} is back");
+        }
+        assert!(dock.find_tab(&Tab::Viewport).is_some());
+    }
+
+    #[test]
+    fn entities_are_labelled_by_name_or_id() {
+        let mut world = shin::ecs::World::new();
+        let entity = world.spawn(());
+        let id = entity_id(entity);
+        assert_eq!(entity_label(entity, None), format!("#{id}"));
+        assert_eq!(
+            entity_label(entity, Some(&Name(String::new()))),
+            format!("#{id}")
+        );
+        assert_eq!(entity_label(entity, Some(&Name("cube".into()))), "cube");
     }
 
     #[test]
