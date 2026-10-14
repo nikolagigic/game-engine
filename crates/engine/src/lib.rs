@@ -15,7 +15,7 @@
 //! - [`headless`] — window-less engine handle for tools and tests (GE-013)
 //!
 //! The MCP server lives in the separate `engine-mcp` crate (GE-014) and is
-//! a thin transport over [`tool::ToolRegistry`]. The engine lib never
+//! a thin transport over `tool::ToolRegistry` (GE-013). The engine lib never
 //! depends on tokio or rmcp.
 //!
 //! Keep this file to module declarations and re-exports only.

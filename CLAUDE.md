@@ -78,23 +78,29 @@ explicitly asks for a public type.
   needed, stop and say so in the PR rather than adding it.
 - GPU data structs are `#[repr(C)] #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]`.
 - Coordinate system: right-handed, +Y up, -Z forward (glTF convention).
+- Colour: `wgpu::Color`, clear colours, material factors, and shader
+  outputs are **linear** RGB. Surfaces and offscreen targets are sRGB
+  formats, so the hardware encodes on write. To show a known sRGB colour,
+  convert it to linear first (cornflower blue `#6495ED` is linear
+  `(0.127, 0.301, 0.846)`).
+- Projections: glam 0.34 moved them off `Mat4`. Use
+  `glam::camera::rh::proj::directx` (right-handed, +Y up NDC, depth 0..1,
+  which is wgpu's convention), already wrapped by `math::Camera`.
 - Tests: unit tests in-module under `#[cfg(test)]`; integration and golden
   tests in `crates/engine/tests/`. Every ticket says which test command
   proves its acceptance criteria.
 - Examples are the manual smoke test. Each rendering ticket adds or updates
   one example under `crates/engine/examples/`.
 
-## Build cache (important for parallel worktrees)
+## Build directory (important for parallel worktrees)
 
-Each worktree would otherwise rebuild wgpu from scratch. Before building,
-export a shared target directory:
-
-```sh
-export CARGO_TARGET_DIR="$HOME/.cache/game-engine/target"
-```
-
-Cargo locks the directory, so concurrent builds serialise safely but share
-artifacts.
+Do **not** share a `CARGO_TARGET_DIR` between worktrees, and do not set
+that variable at all. Cargo judges freshness by file timestamps, so a
+shared target directory hands a checkout whose files are older than the
+last build a stale library, and tests then pass or fail against the wrong
+code. Each worktree uses its own `target/` (gitignored). The first build in
+a fresh worktree compiles the dependencies once, about a minute; after that
+builds are incremental.
 
 ## Workflow
 
