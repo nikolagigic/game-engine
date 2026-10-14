@@ -364,7 +364,7 @@ fn flat_shaded(
     indices: &[u32],
 ) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(indices.len());
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(positions[tri[k] as usize]));
         let normal = (b - a).cross(c - a).normalize_or_zero().to_array();
         for &i in tri {
@@ -447,7 +447,7 @@ mod tests {
     use super::*;
 
     fn assert_ccw_from_outside(mesh: &MeshData) {
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(mesh.vertices[tri[k] as usize].position));
             let face = (b - a).cross(c - a);
             for &i in tri {
