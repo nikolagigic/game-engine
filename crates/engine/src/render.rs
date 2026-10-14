@@ -547,9 +547,7 @@ pub fn render_world(
     let state = res.expect_mut::<RenderState>();
 
     // Group instances by mesh.
-    state
-        .batches
-        .resize_with(state.registry.len(), Vec::new);
+    state.batches.resize_with(state.registry.len(), Vec::new);
     state.batches.iter_mut().for_each(Vec::clear);
     let mut unknown = 0;
     for (transform, instance) in world.query_mut::<(&Transform, &MeshInstance)>() {
@@ -571,7 +569,10 @@ pub fn render_world(
         }
         let start = state.instances.len() as u32;
         state.instances.extend_from_slice(batch);
-        draws.push((MeshHandle(index as u32), start..state.instances.len() as u32));
+        draws.push((
+            MeshHandle(index as u32),
+            start..state.instances.len() as u32,
+        ));
     }
 
     state.renderer.set_camera(&ctx.queue, &camera, aspect);

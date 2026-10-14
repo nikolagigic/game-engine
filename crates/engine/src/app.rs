@@ -114,9 +114,8 @@ pub trait Game {
 ///
 /// To draw [`crate::render::MeshInstance`] entities, call
 /// [`crate::render::render_world`] from here.
-pub type RenderFn = Box<
-    dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu::TextureView, &wgpu::TextureView),
->;
+pub type RenderFn =
+    Box<dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu::TextureView, &wgpu::TextureView)>;
 
 /// A [`Game`] that is a [`World`] plus a [`Schedule`] of systems.
 ///
