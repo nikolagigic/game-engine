@@ -53,7 +53,10 @@ fn cube_matches_golden() -> anyhow::Result<()> {
     let top = sample(Vec3::Y);
     let left = sample(Vec3::NEG_X);
     let right = sample(Vec3::Z);
-    assert!(brightness(&top) > brightness(&left), "top must be brightest");
+    assert!(
+        brightness(&top) > brightness(&left),
+        "top must be brightest"
+    );
     assert!(
         brightness(&left) > brightness(&right),
         "three distinct levels"
