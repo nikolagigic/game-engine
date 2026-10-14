@@ -6,6 +6,8 @@
 //! frames are produced on demand with [`Headless::render`], so results are
 //! deterministic.
 
+use std::path::Path;
+
 use anyhow::Context as _;
 
 use crate::app::RenderFn;
@@ -13,7 +15,9 @@ use crate::asset::Assets;
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::math::{Camera, Projection, Transform, Vec3};
+use crate::project::{Project, ProjectRoot};
 use crate::render::{LightUniform, RenderState, render_world};
+use crate::scene;
 use crate::stats::{FrameStats, frame_stats_system};
 
 /// A window-less engine: everything [`crate::app::EcsGame`] has, plus a GPU
@@ -86,6 +90,75 @@ impl Headless {
             clear_color: wgpu::Color::BLACK,
             render_fn: Some(render_fn),
         })
+    }
+
+    /// [`Self::new`] at the window size from `<dir>/shin.toml`, then
+    /// [`Self::load_project`] on `dir`. What `shin-mcp --project` and the
+    /// tests start from.
+    pub fn open_project(dir: &Path) -> anyhow::Result<Self> {
+        let project = Project::load(dir)?;
+        let mut engine = Self::new(project.window.width, project.window.height)?;
+        engine.load_project(dir)?;
+        Ok(engine)
+    }
+
+    /// Opens the project in `dir` on this engine and returns its manifest.
+    ///
+    /// Reads `<dir>/shin.toml`, replaces the [`Assets`] cache with one
+    /// rooted at the project, inserts the [`ProjectRoot`] resource (the
+    /// canonical `dir`), resizes the target to the project's window size,
+    /// and replaces every entity: with the entry scene if the project has
+    /// one (which also sets the camera and light it describes), otherwise
+    /// with nothing.
+    ///
+    /// Fails if `dir` or its manifest cannot be read, or the entry scene
+    /// does not load; the engine is then left as it was.
+    pub fn load_project(&mut self, dir: &Path) -> anyhow::Result<Project> {
+        let root = dir
+            .canonicalize()
+            .with_context(|| format!("cannot open project directory {}", dir.display()))?;
+        let project = Project::load(&root)?;
+        let root = ProjectRoot(root);
+        let entry_scene = project
+            .entry_scene
+            .as_deref()
+            .map(|scene| root.resolve(scene))
+            .transpose()
+            .context("invalid entry_scene in shin.toml")?;
+
+        // Scene loading resolves meshes through the `Assets` resource, so
+        // swap in the project's cache first and put the old one back if
+        // the scene fails to load.
+        let assets = Assets::new(root.0.clone());
+        let previous = match self.resources.get_mut::<Assets>() {
+            Some(current) => Some(std::mem::replace(current, assets)),
+            None => {
+                self.resources.insert(assets);
+                None
+            }
+        };
+        if let Some(path) = &entry_scene {
+            let loaded = scene::load(
+                &mut self.world,
+                &mut self.resources,
+                &self.gpu.device,
+                &self.gpu.queue,
+                path,
+            );
+            if let Err(err) = loaded {
+                if let Some(previous) = previous {
+                    self.resources.insert(previous);
+                }
+                return Err(err.context(format!("failed to load project `{}`", project.name)));
+            }
+        } else {
+            self.world.clear();
+        }
+
+        log::info!("opened project `{}` in {}", project.name, root.0.display());
+        self.resources.insert(root);
+        self.resize(project.window.width, project.window.height);
+        Ok(project)
     }
 
     /// Recreates the offscreen target at the new size. A zero width or

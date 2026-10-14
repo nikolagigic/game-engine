@@ -45,7 +45,9 @@ mod project {
     fn scaffolded_manifest_round_trips() -> anyhow::Result<()> {
         let dir = scaffold("round-trip")?;
         let loaded = Project::load(&dir)?;
-        assert_eq!(loaded, Project::new("round-trip"));
+        let mut expected = Project::new("round-trip");
+        expected.entry_scene = Some(PathBuf::from(project::STARTER_SCENE));
+        assert_eq!(loaded, expected);
         assert_eq!(loaded.window.title, "round-trip");
         loaded.save(&dir)?;
         assert_eq!(Project::load(&dir)?, loaded);

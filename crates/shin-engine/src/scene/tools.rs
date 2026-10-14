@@ -1,7 +1,9 @@
 //! Scene file tools (GE-021): `scene.save` and `scene.load`.
 //!
-//! Relative paths are resolved against the [`Assets`] root (the project
-//! directory), the same directory relative mesh sources use.
+//! With a project open (GE-026), relative paths are resolved against its
+//! [`ProjectRoot`] and a path that escapes the root is rejected. Otherwise
+//! they are resolved against the [`Assets`] root, the same directory
+//! relative mesh sources use.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +15,7 @@ use serde_json::json;
 use crate::asset::Assets;
 use crate::headless::Headless;
 use crate::math::Transform;
+use crate::project::ProjectRoot;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers `scene.save` and `scene.load`.
@@ -38,8 +41,9 @@ pub fn register_tools(reg: &mut ToolRegistry) {
 #[serde(deny_unknown_fields)]
 struct SaveArgs {
     /// File to write, ending in ".scene.ron", e.g. "scenes/main.scene.ron".
-    /// Relative paths are resolved against the project directory (the
-    /// engine's working directory). An existing file is overwritten.
+    /// Relative paths are resolved against the open project's directory
+    /// (paths leaving it are rejected), or the engine's working directory
+    /// when no project is open. An existing file is overwritten.
     path: String,
 }
 
@@ -57,8 +61,8 @@ fn scene_save(engine: &mut Headless, args: SaveArgs) -> anyhow::Result<ToolOutpu
 #[serde(deny_unknown_fields)]
 struct LoadArgs {
     /// Scene file to read, e.g. "scenes/main.scene.ron". Relative paths are
-    /// resolved against the project directory (the engine's working
-    /// directory).
+    /// resolved against the open project's directory (paths leaving it are
+    /// rejected), or the engine's working directory when no project is open.
     path: String,
 }
 
@@ -74,8 +78,13 @@ fn scene_load(engine: &mut Headless, args: LoadArgs) -> anyhow::Result<ToolOutpu
     Ok(ToolOutput::Json(json!({ "entities": entities })))
 }
 
-/// `path` resolved against the [`Assets`] root.
+/// `path` resolved against the open project's [`ProjectRoot`] (rejecting
+/// paths that escape it), or against the [`Assets`] root when no project
+/// is open.
 fn resolve(engine: &Headless, path: &str) -> anyhow::Result<PathBuf> {
+    if let Some(root) = engine.resources.get::<ProjectRoot>() {
+        return root.resolve(Path::new(path));
+    }
     let assets = engine
         .resources
         .get::<Assets>()
