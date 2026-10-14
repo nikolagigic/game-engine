@@ -61,6 +61,14 @@ impl Default for AppConfig {
 
 /// User code implements this. [`run`] owns the loop and calls these hooks.
 pub trait Game {
+    /// Called once with the window, right after it is created and before
+    /// [`init`](Self::init). Games that drive a windowing integration of
+    /// their own (the editor's egui-winit state needs the window for its
+    /// scale factor, size, and clipboard) keep a clone of the `Arc`.
+    fn window_created(&mut self, window: &Arc<Window>) {
+        let _ = window;
+    }
+
     /// Called once after the GPU context exists.
     fn init(&mut self, ctx: &GpuContext) -> anyhow::Result<()> {
         let _ = ctx;
@@ -435,6 +443,7 @@ impl<G: Game> Runner<G> {
         let size = window.inner_size();
         let target = SurfaceTarget::new(&gpu, surface, size.width, size.height)?;
 
+        self.game.window_created(&window);
         self.game.init(&gpu)?;
         window.request_redraw();
         self.state = Some(Running {

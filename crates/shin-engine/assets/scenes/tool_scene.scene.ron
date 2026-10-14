@@ -1,0 +1,41 @@
+// The GE-015 tool round-trip scene (tests/tools_scene_roundtrip.rs) as a
+// file: three cubes in a row under the default camera and light. Rendered at
+// 128x128 it matches tests/golden/tool_scene.png.
+(
+    version: 1,
+    camera: (
+        position: (0.0, 2.0, 5.0),
+        look_at: (0.0, 0.0, 0.0),
+        fov_y_deg: 45.0,
+    ),
+    light: (
+        direction: (1.0, -2.0, -1.0),
+        color: (1.0, 1.0, 1.0),
+        ambient: (0.1, 0.1, 0.1),
+    ),
+    entities: [
+        (
+            name: "red",
+            transform: (
+                translation: (-1.5, 0.0, 0.0),
+                rotation_euler_deg: (0.0, 30.0, 0.0),
+            ),
+            mesh: "builtin://cube",
+            color: (0.8, 0.1, 0.1, 1.0),
+        ),
+        (
+            name: "green",
+            mesh: "builtin://cube",
+            color: (0.1, 0.8, 0.1, 1.0),
+        ),
+        (
+            name: "blue",
+            transform: (
+                translation: (1.5, 0.0, 0.0),
+                scale: (0.6, 0.6, 0.6),
+            ),
+            mesh: "builtin://cube",
+            color: (0.1, 0.1, 0.8, 1.0),
+        ),
+    ],
+)

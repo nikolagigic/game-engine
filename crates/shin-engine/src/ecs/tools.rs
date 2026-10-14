@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Entity, Time, World};
+use super::{Entity, Name, Time, World};
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
@@ -22,15 +22,15 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "entity.spawn",
         "Spawns an entity that draws a mesh (a handle from mesh.list, mesh.builtin, or \
-         scene.load_gltf) with a transform, a linear RGBA colour, and optionally a \
-         base-colour texture (a handle from asset.load). Returns its id.",
+         scene.load_gltf) with a transform, a linear RGBA colour, an optional name, and \
+         optionally a base-colour texture (a handle from asset.load). Returns its id.",
         entity_spawn,
     ));
     reg.register(TypedTool::new(
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
-         (Euler degrees, XYZ), scale, and mesh, colour, and texture (a handle or null) if \
-         the entity draws one.",
+         (Euler degrees, XYZ), scale, name if it has one, and mesh, colour, and texture \
+         (a handle or null) if the entity draws one.",
         entity_list,
     ));
     reg.register(TypedTool::new(
@@ -76,6 +76,9 @@ struct SpawnArgs {
     /// Base-colour texture handle from asset.load (an image source),
     /// multiplied into `color`; default none (untextured).
     texture: Option<u32>,
+    /// Human-readable name, shown by entity.list and saved in scene files;
+    /// default none.
+    name: Option<String>,
 }
 
 fn entity_spawn(engine: &mut Headless, args: SpawnArgs) -> anyhow::Result<ToolOutput> {
@@ -115,6 +118,9 @@ fn entity_spawn(engine: &mut Headless, args: SpawnArgs) -> anyhow::Result<ToolOu
             texture,
         },
     ));
+    if let Some(name) = args.name {
+        engine.world.insert_one(entity, Name(name))?;
+    }
     Ok(ToolOutput::Json(json!({ "entity": entity_id(entity) })))
 }
 
@@ -134,11 +140,14 @@ fn default_limit() -> usize {
 fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutput> {
     let mut rows: Vec<(u64, Value)> = engine
         .world
-        .query::<(Entity, &Transform, Option<&MeshInstance>)>()
+        .query::<(Entity, &Transform, Option<&MeshInstance>, Option<&Name>)>()
         .iter()
-        .map(|(entity, transform, instance)| {
+        .map(|(entity, transform, instance, name)| {
             let mut row = transform_json(transform);
             row["entity"] = json!(entity_id(entity));
+            if let Some(Name(name)) = name {
+                row["name"] = json!(name);
+            }
             if let Some(instance) = instance {
                 row["mesh"] = json!(instance.mesh.0);
                 row["color"] = json!(instance.color);
@@ -331,6 +340,7 @@ mod tests {
                 "rotation_euler_deg": [0, 90, 0],
                 "scale": [2, 2, 2],
                 "color": [1, 0, 0, 1],
+                "name": "red cube",
             }),
         )?;
         let id = spawned["entity"].as_u64().expect("entity id");
@@ -340,6 +350,7 @@ mod tests {
         let row = &list[0];
         assert_eq!(row["entity"], id);
         assert_eq!(row["mesh"], cube);
+        assert_eq!(row["name"], "red cube");
         assert_eq!(row["color"], json!([1.0, 0.0, 0.0, 1.0]));
         assert_close(&row["translation"], [1.0, 2.0, 3.0]);
         assert_close(&row["rotation_euler_deg"], [0.0, 90.0, 0.0]);
