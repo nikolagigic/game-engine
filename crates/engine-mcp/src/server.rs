@@ -61,12 +61,8 @@ impl ServerHandler for EngineServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let args = Value::Object(request.arguments.unwrap_or_default());
-        let output = self
-            .engine
-            .call(request.name.into_owned(), args)
-            .await
-            .map_err(to_mcp_error)?;
-        Ok(CallToolResult::success(vec![to_content(output)?]).into())
+        let result = self.engine.call(request.name.into_owned(), args).await;
+        Ok(to_call_result(result)?.into())
     }
 }
 
@@ -99,13 +95,22 @@ fn to_content(output: ToolOutput) -> Result<ContentBlock, ErrorData> {
     })
 }
 
-/// Maps a tool error to a JSON-RPC error, preserving its message.
-/// Invalid arguments are invalid-params; everything else is internal.
-fn to_mcp_error(err: ToolError) -> ErrorData {
-    let message = format!("{err:#}");
-    match err {
-        ToolError::InvalidArgs { .. } => ErrorData::invalid_params(message, None),
-        ToolError::Unknown(_) | ToolError::Failed(_) => ErrorData::internal_error(message, None),
+/// Maps a registry call result to an MCP tool result, following the MCP
+/// split between protocol errors and tool errors (messages preserved):
+///
+/// - an unknown tool or invalid arguments is a request the client should
+///   not have sent: a JSON-RPC invalid-params error (-32602);
+/// - a tool that ran and failed is a tool result with `isError: true`, so
+///   the agent sees the failure and can react to it.
+fn to_call_result(result: Result<ToolOutput, ToolError>) -> Result<CallToolResult, ErrorData> {
+    match result {
+        Ok(output) => Ok(CallToolResult::success(vec![to_content(output)?])),
+        Err(err @ (ToolError::Unknown(_) | ToolError::InvalidArgs { .. })) => {
+            Err(ErrorData::invalid_params(err.to_string(), None))
+        }
+        Err(ToolError::Failed(err)) => Ok(CallToolResult::error(vec![ContentBlock::text(
+            format!("{err:#}"),
+        )])),
     }
 }
 
@@ -140,16 +145,36 @@ mod tests {
     }
 
     #[test]
-    fn errors_keep_their_message_and_kind() {
-        let invalid = to_mcp_error(ToolError::InvalidArgs {
+    fn bad_requests_are_invalid_params_errors() {
+        let invalid = to_call_result(Err(ToolError::InvalidArgs {
             tool: "a.b".into(),
             message: "field `x`".into(),
-        });
+        }))
+        .unwrap_err();
         assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
         assert!(invalid.message.contains("field `x`"));
 
-        let unknown = to_mcp_error(ToolError::Unknown("nope".into()));
-        assert_eq!(unknown.code, ErrorCode::INTERNAL_ERROR);
+        let unknown = to_call_result(Err(ToolError::Unknown("nope".into()))).unwrap_err();
+        assert_eq!(unknown.code, ErrorCode::INVALID_PARAMS);
         assert!(unknown.message.contains("nope"));
+    }
+
+    #[test]
+    fn tool_failure_is_an_error_result() {
+        let failed = to_call_result(Err(ToolError::Failed(
+            anyhow::anyhow!("inner cause").context("render failed"),
+        )))
+        .unwrap();
+        assert_eq!(failed.is_error, Some(true));
+        let ContentBlock::Text(text) = &failed.content[0] else {
+            panic!("expected text, got {failed:?}");
+        };
+        assert_eq!(text.text, "render failed: inner cause");
+    }
+
+    #[test]
+    fn success_is_not_an_error_result() {
+        let ok = to_call_result(Ok(ToolOutput::Text("hi".into()))).unwrap();
+        assert_eq!(ok.is_error, Some(false));
     }
 }

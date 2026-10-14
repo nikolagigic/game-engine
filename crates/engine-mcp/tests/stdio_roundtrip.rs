@@ -134,6 +134,8 @@ fn stdio_roundtrip() {
         .as_str()
         .unwrap_or_else(|| panic!("expected a JSON-RPC error, got {unknown}"));
     assert!(message.contains("no.such_tool"), "{message}");
+    // Invalid params, per the MCP spec for an unknown tool.
+    assert_eq!(unknown["error"]["code"], json!(-32602), "{unknown}");
 
     // The server keeps serving after the error.
     let info = server.request(
