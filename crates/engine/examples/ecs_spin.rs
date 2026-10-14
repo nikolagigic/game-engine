@@ -85,5 +85,6 @@ fn main() -> anyhow::Result<()> {
         title: "ecs_spin".to_string(),
         ..Default::default()
     };
+    game.title = config.title.clone();
     app::run(config, game)
 }

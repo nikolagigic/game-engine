@@ -7,7 +7,8 @@
 //!
 //! [`EcsGame`] is a ready-made [`Game`] for applications that are "a world
 //! plus systems" (see [`crate::ecs`]). It keeps an
-//! [`InputState`] resource up to date.
+//! [`InputState`] resource up to date and records frame times in a
+//! [`FrameStats`] resource.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +24,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
 use crate::input::InputState;
+use crate::stats::{FrameStats, frame_stats_system};
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
 /// breakpoint, a dragged window) are clamped so the loop never tries to
@@ -128,6 +130,10 @@ pub type RenderFn =
 /// It also owns input: an [`InputState`] resource receives every window and
 /// device event, is reset with [`InputState::end_frame`] after the frame
 /// systems, and its `cursor_grabbed` flag drives the window cursor.
+///
+/// Frame times go into a [`FrameStats`] resource: [`frame_stats_system`]
+/// runs after every frame system in the schedule, and once per second the
+/// window title becomes `"{title} | {summary}"` (see [`Self::title`]).
 pub struct EcsGame {
     /// Entities and components.
     pub world: World,
@@ -137,7 +143,16 @@ pub struct EcsGame {
     pub schedule: Schedule,
     /// Optional drawing callback, run last in every frame.
     pub render_fn: Option<RenderFn>,
+    /// Base window title, shown before the [`FrameStats::summary`] once
+    /// per second. Empty by default, which shows the summary alone; set it
+    /// to [`AppConfig::title`] to keep the name visible.
+    pub title: String,
     last_frame: Option<Instant>,
+    /// Frame time accumulated since the window title was last rebuilt.
+    title_age: f64,
+    /// The title [`Game::title`] reports; `None` until one second of
+    /// frames has been measured, so the configured title shows first.
+    stats_title: Option<String>,
 }
 
 impl Default for EcsGame {
@@ -147,18 +162,22 @@ impl Default for EcsGame {
 }
 
 impl EcsGame {
-    /// A game over `world` driven by `schedule`, with default [`Time`] and
-    /// [`InputState`] resources and no render callback.
+    /// A game over `world` driven by `schedule`, with default [`Time`],
+    /// [`InputState`] and [`FrameStats`] resources and no render callback.
     pub fn new(world: World, schedule: Schedule) -> Self {
         let mut resources = Resources::new();
         resources.insert(Time::default());
         resources.insert(InputState::default());
+        resources.insert(FrameStats::default());
         Self {
             world,
             resources,
             schedule,
             render_fn: None,
+            title: String::new(),
             last_frame: None,
+            title_age: 0.0,
+            stats_title: None,
         }
     }
 
@@ -172,8 +191,9 @@ impl EcsGame {
     }
 
     /// The GPU-independent half of [`Game::render`]: updates `frame_dt`
-    /// and `alpha` in [`Time`], runs the frame systems, then ends the input
-    /// frame.
+    /// and `alpha` in [`Time`], runs the frame systems and then
+    /// [`frame_stats_system`], ends the input frame, and rebuilds the
+    /// window title if a second has passed since the last rebuild.
     fn begin_frame(&mut self, alpha: f64) {
         let now = Instant::now();
         let frame_dt = self
@@ -186,8 +206,25 @@ impl EcsGame {
         time.alpha = alpha;
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
+        // Run directly rather than via the schedule so it stays last even
+        // when user code adds frame systems after `new`.
+        frame_stats_system(&mut self.world, &mut self.resources);
         if let Some(input) = self.resources.get_mut::<InputState>() {
             input.end_frame();
+        }
+
+        self.title_age += frame_dt;
+        if self.title_age >= 1.0 {
+            self.title_age = 0.0;
+            let summary = self
+                .resources
+                .get::<FrameStats>()
+                .map_or_else(String::new, FrameStats::summary);
+            self.stats_title = Some(if self.title.is_empty() {
+                summary
+            } else {
+                format!("{} | {summary}", self.title)
+            });
         }
     }
 }
@@ -220,6 +257,12 @@ impl Game for EcsGame {
         if let Some(input) = self.resources.get_mut::<InputState>() {
             input.handle_device_event(event);
         }
+    }
+
+    /// `"{title} | {summary}"`, rebuilt once per second of frames; `None`
+    /// during the first second.
+    fn title(&self) -> Option<String> {
+        self.stats_title.clone()
     }
 
     fn cursor_grabbed(&self) -> bool {
@@ -649,6 +692,34 @@ mod tests {
 
         game.resources.expect_mut::<InputState>().cursor_grabbed = true;
         assert!(game.cursor_grabbed());
+    }
+
+    #[test]
+    fn ecs_game_records_frame_stats_after_frame_systems() {
+        let mut game = EcsGame {
+            title: "demo".to_string(),
+            ..Default::default()
+        };
+        assert!(game.resources.get::<FrameStats>().is_some());
+
+        game.begin_frame(0.0);
+        assert!(
+            game.resources.expect::<FrameStats>().is_empty(),
+            "the first frame has no frame_dt to record"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        game.begin_frame(0.0);
+        let stats = game.resources.expect::<FrameStats>();
+        assert_eq!(stats.len(), 1);
+        assert!(stats.mean_ms() >= 5.0, "mean {}", stats.mean_ms());
+        assert_eq!(game.title(), None, "no title before a second has passed");
+
+        // A second's worth of frame time rebuilds the title.
+        game.title_age = 1.0;
+        game.begin_frame(0.0);
+        let title = game.title().expect("title after one second");
+        let summary = game.resources.expect::<FrameStats>().summary();
+        assert_eq!(title, format!("demo | {summary}"));
     }
 
     #[test]

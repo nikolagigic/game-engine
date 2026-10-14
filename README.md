@@ -101,6 +101,7 @@ mesh.list             {}
 camera.set            { position?, look_at?, fov_y_deg? }
 light.set             { direction?, color?, ambient? }
 render.frame          { width?, height? }
+stats.summary         {}
 ```
 
 Vectors are JSON arrays (`[x, y, z]`; colours are linear `[r, g, b, a]`),

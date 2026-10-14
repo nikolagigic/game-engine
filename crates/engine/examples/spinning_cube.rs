@@ -1,6 +1,7 @@
 //! A lit cube spinning around +Y at 1 rad/s. The camera sits at `(0, 2, 5)`
 //! looking at the origin; a white light travels along `(1, -2, -1)`, coming
-//! from above-front-left. Press Escape to quit.
+//! from above-front-left. Once a second the title shows the frame-time
+//! summary. Press Escape to quit.
 //!
 //! Run with `cargo run --example spinning_cube` (add `RUST_LOG=wgpu=warn`
 //! to see any wgpu warnings).
@@ -8,11 +9,17 @@
 //! The renderer is created on the first frame, once the surface format is
 //! known (`view.texture().format()`); the depth view comes from the loop.
 
+use std::time::Instant;
+
 use engine::app::{self, AppConfig, Game};
 use engine::asset;
 use engine::gpu::GpuContext;
 use engine::math::{Camera, Projection, Quat, Transform, Vec3};
 use engine::render::{GpuMesh, InstanceRaw, LightUniform, MeshRenderer, begin_mesh_pass};
+use engine::stats::FrameStats;
+
+/// Window title before the first frame-time summary.
+const TITLE: &str = "spinning_cube";
 
 /// Spin speed around +Y, in radians per second.
 const SPIN_SPEED: f64 = 1.0;
@@ -38,6 +45,12 @@ struct SpinningCube {
     previous_angle: f64,
     angle: f64,
     gpu: Option<Gpu>,
+    /// Frame times, measured between `render` calls.
+    stats: FrameStats,
+    last_frame: Option<Instant>,
+    /// When `title` was last rebuilt.
+    title_updated: Instant,
+    title: String,
 }
 
 impl SpinningCube {
@@ -56,6 +69,10 @@ impl SpinningCube {
             previous_angle: 0.0,
             angle: 0.0,
             gpu: None,
+            stats: FrameStats::default(),
+            last_frame: None,
+            title_updated: Instant::now(),
+            title: TITLE.to_string(),
         }
     }
 }
@@ -73,6 +90,15 @@ impl Game for SpinningCube {
         depth: &wgpu::TextureView,
         alpha: f64,
     ) {
+        let now = Instant::now();
+        if let Some(last) = self.last_frame.replace(now) {
+            self.stats.push((now - last).as_secs_f64());
+        }
+        if (now - self.title_updated).as_secs_f64() >= 1.0 {
+            self.title = format!("{TITLE} | {}", self.stats.summary());
+            self.title_updated = now;
+        }
+
         let texture = view.texture();
         let gpu = self.gpu.get_or_insert_with(|| {
             let renderer = MeshRenderer::new(&ctx.device, texture.format());
@@ -110,12 +136,16 @@ impl Game for SpinningCube {
         }
         ctx.queue.submit([encoder.finish()]);
     }
+
+    fn title(&self) -> Option<String> {
+        Some(self.title.clone())
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let config = AppConfig {
-        title: "spinning_cube".to_string(),
+        title: TITLE.to_string(),
         clear_color: CLEAR,
         ..Default::default()
     };

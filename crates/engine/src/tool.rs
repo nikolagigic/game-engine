@@ -269,13 +269,15 @@ impl ToolRegistry {
 
     /// [`Self::with_builtins`] plus every subsystem's tools: assets
     /// (`scene.load_gltf`, `mesh.builtin`), ECS (`entity.*`, `scene.clear`,
-    /// `sim.step`), and render (`mesh.list`, `camera.set`, `light.set`,
-    /// `render.frame`). This is the registry `engine-mcp` serves.
+    /// `sim.step`), render (`mesh.list`, `camera.set`, `light.set`,
+    /// `render.frame`), and stats (`stats.summary`). This is the registry
+    /// `engine-mcp` serves.
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
         crate::asset::register_tools(&mut registry);
         crate::ecs::register_tools(&mut registry);
         crate::render::register_tools(&mut registry);
+        crate::stats::register_tools(&mut registry);
         registry
     }
 

@@ -76,5 +76,6 @@ fn main() -> anyhow::Result<()> {
         },
         ..Default::default()
     };
+    game.title = config.title.clone();
     app::run(config, game)
 }

@@ -13,6 +13,7 @@ use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::math::{Camera, Projection, Transform, Vec3};
 use crate::render::{LightUniform, RenderState, render_world};
+use crate::stats::{FrameStats, frame_stats_system};
 
 /// A window-less engine: everything [`crate::app::EcsGame`] has, plus a GPU
 /// context and an offscreen target instead of a window.
@@ -41,9 +42,10 @@ pub struct Headless {
 
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
-    /// offscreen target, with an empty world and schedule.
+    /// offscreen target, with an empty world and a schedule holding only
+    /// [`frame_stats_system`].
     ///
-    /// Resources: a default [`Time`]; a [`RenderState`] with no meshes and
+    /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
     /// [`default_light`]; and [`default_camera`]. [`Self::render_fn`]
     /// draws the world with [`render_world`], so spawning an entity with a
     /// `Transform` and a `MeshInstance` is enough to see it.
@@ -58,6 +60,9 @@ impl Headless {
         let target = OffscreenTarget::new(&gpu.device, width, height);
         let mut resources = Resources::new();
         resources.insert(Time::default());
+        resources.insert(FrameStats::default());
+        let mut schedule = Schedule::new();
+        schedule.add_frame("frame_stats", frame_stats_system);
         let mut render_state = RenderState::new(&gpu.device, OFFSCREEN_COLOR_FORMAT);
         render_state.light = default_light();
         resources.insert(render_state);
@@ -71,7 +76,7 @@ impl Headless {
             gpu,
             world: World::new(),
             resources,
-            schedule: Schedule::new(),
+            schedule,
             target,
             fixed_dt: 1.0 / 60.0,
             clear_color: wgpu::Color::BLACK,
