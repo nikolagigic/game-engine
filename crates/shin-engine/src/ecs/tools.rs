@@ -1,5 +1,7 @@
 //! ECS tools (GE-015): `entity.spawn`, `entity.list`,
-//! `entity.set_transform`, `entity.despawn`, `scene.clear`, `sim.step`.
+//! `entity.set_transform`, `entity.despawn`, `scene.clear`, `sim.step`;
+//! and (GE-023, for granular undo in the editor) `entity.set_name`,
+//! `entity.set_color`, and `entity.set_mesh`.
 //!
 //! Entities are identified by [`Entity::to_bits`]. Rotations are Euler
 //! angles in degrees `[x, y, z]`, applied in intrinsic X, then Y, then Z
@@ -12,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Entity, Name, Time, World};
+use crate::asset::{AssetSource, with_assets};
 use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
@@ -43,6 +46,34 @@ pub fn register_tools(reg: &mut ToolRegistry) {
             "Changes an entity's translation, rotation (Euler degrees, XYZ), and/or scale. \
          Omitted fields keep their value. Returns the new transform.",
             entity_set_transform,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "entity.set_name",
+            "Renames an entity; an empty name removes its name. Returns the entity's id and \
+         name (null when removed).",
+            entity_set_name,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "entity.set_color",
+            "Changes the linear RGBA colour of an entity that draws a mesh. Fails if the \
+         entity draws nothing.",
+            entity_set_color,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "entity.set_mesh",
+            "Makes an entity draw the mesh named by an asset source (e.g. \"builtin://sphere\" \
+         or \"assets/x.gltf#1\"), loading it if needed. Colour and texture are kept; an \
+         entity that drew nothing gets a white one. Returns the mesh handle.",
+            entity_set_mesh,
         )
         .with_affected(named_entity),
     );
@@ -209,6 +240,91 @@ fn entity_set_transform(
         args.scale,
     );
     Ok(ToolOutput::Json(transform_json(transform)))
+}
+
+/// Arguments of `entity.set_name`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetNameArgs {
+    /// Entity id, as returned by entity.spawn or entity.list.
+    entity: u64,
+    /// The new name; empty removes the name.
+    name: String,
+}
+
+fn entity_set_name(engine: &mut Headless, args: SetNameArgs) -> anyhow::Result<ToolOutput> {
+    let entity = find_entity(&engine.world, args.entity)?;
+    let name = if args.name.is_empty() {
+        // Removing a name the entity does not have is not an error.
+        let _ = engine.world.remove_one::<Name>(entity);
+        None
+    } else {
+        engine.world.insert_one(entity, Name(args.name.clone()))?;
+        Some(args.name)
+    };
+    Ok(ToolOutput::Json(
+        json!({ "entity": args.entity, "name": name }),
+    ))
+}
+
+/// Arguments of `entity.set_color`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetColorArgs {
+    /// Entity id, as returned by entity.spawn or entity.list.
+    entity: u64,
+    /// New linear RGBA colour `[r, g, b, a]`.
+    color: [f32; 4],
+}
+
+fn entity_set_color(engine: &mut Headless, args: SetColorArgs) -> anyhow::Result<ToolOutput> {
+    let entity = find_entity(&engine.world, args.entity)?;
+    let instance = engine
+        .world
+        .query_one_mut::<&mut MeshInstance>(entity)
+        .map_err(|_| anyhow::anyhow!("entity {} draws no mesh, so it has no colour", args.entity))?;
+    instance.color = args.color;
+    Ok(ToolOutput::Json(
+        json!({ "entity": args.entity, "color": args.color }),
+    ))
+}
+
+/// Arguments of `entity.set_mesh`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetMeshArgs {
+    /// Entity id, as returned by entity.spawn or entity.list.
+    entity: u64,
+    /// Mesh asset source: "builtin://cube", "builtin://sphere", or a glTF
+    /// path with an optional triangle-primitive index, e.g.
+    /// "assets/x.gltf#2". Relative paths are resolved against the project.
+    source: String,
+}
+
+fn entity_set_mesh(engine: &mut Headless, args: SetMeshArgs) -> anyhow::Result<ToolOutput> {
+    let entity = find_entity(&engine.world, args.entity)?;
+    let source = AssetSource::parse(&args.source)?;
+    anyhow::ensure!(
+        !source.is_texture(),
+        "{source} is a texture source; entity.set_mesh needs a mesh source"
+    );
+    let mesh = with_assets(engine, |assets, gpu, state| {
+        assets.mesh(&gpu.device, &mut state.registry, &source)
+    })??;
+    match engine.world.query_one_mut::<&mut MeshInstance>(entity) {
+        Ok(instance) => instance.mesh = mesh,
+        Err(_) => engine.world.insert_one(
+            entity,
+            MeshInstance {
+                mesh,
+                color: [1.0; 4],
+                texture: None,
+            },
+        )?,
+    }
+    Ok(ToolOutput::Json(
+        json!({ "entity": args.entity, "mesh": mesh.0 }),
+    ))
 }
 
 /// Arguments of `entity.despawn`.
@@ -485,6 +601,136 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ToolError::Failed(_)), "{err:?}");
         assert!(err.to_string().contains(&id.to_string()), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn new_setters_are_listed() -> anyhow::Result<()> {
+        let (reg, mut engine, _) = setup()?;
+        let tools = call_json(&reg, &mut engine, "engine.list_tools", json!({}))?;
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for name in ["entity.set_name", "entity.set_color", "entity.set_mesh"] {
+            assert!(names.contains(&name), "{name} is listed: {names:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_name_renames_and_empty_removes() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let id = call_json(&reg, &mut engine, "entity.spawn", json!({ "mesh": cube }))?["entity"]
+            .clone();
+        let out = call_json(
+            &reg,
+            &mut engine,
+            "entity.set_name",
+            json!({ "entity": id, "name": "crate" }),
+        )?;
+        assert_eq!(out["name"], "crate");
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["name"], "crate");
+
+        let out = call_json(
+            &reg,
+            &mut engine,
+            "entity.set_name",
+            json!({ "entity": id, "name": "" }),
+        )?;
+        assert_eq!(out["name"], Value::Null);
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert!(list[0].get("name").is_none(), "{list}");
+        Ok(())
+    }
+
+    #[test]
+    fn set_color_changes_colour_and_needs_a_mesh() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let id = call_json(&reg, &mut engine, "entity.spawn", json!({ "mesh": cube }))?["entity"]
+            .clone();
+        call_json(
+            &reg,
+            &mut engine,
+            "entity.set_color",
+            json!({ "entity": id, "color": [0, 0.5, 1, 1] }),
+        )?;
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["color"], json!([0.0, 0.5, 1.0, 1.0]));
+
+        let bare = engine.world.spawn((Transform::IDENTITY,));
+        let err = reg
+            .call(
+                &mut engine,
+                "entity.set_color",
+                json!({ "entity": entity_id(bare), "color": [1, 1, 1, 1] }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("draws no mesh"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn set_mesh_loads_the_source_and_keeps_colour() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let id = call_json(
+            &reg,
+            &mut engine,
+            "entity.spawn",
+            json!({ "mesh": cube, "color": [1, 0, 0, 1] }),
+        )?["entity"]
+            .clone();
+        let out = call_json(
+            &reg,
+            &mut engine,
+            "entity.set_mesh",
+            json!({ "entity": id, "source": "builtin://sphere" }),
+        )?;
+        let sphere = out["mesh"].as_u64().unwrap();
+        assert_ne!(sphere, u64::from(cube));
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_eq!(list[0]["mesh"], sphere);
+        assert_eq!(list[0]["color"], json!([1.0, 0.0, 0.0, 1.0]));
+
+        for bad in ["builtin://torus", "assets/x.png"] {
+            let err = reg
+                .call(
+                    &mut engine,
+                    "entity.set_mesh",
+                    json!({ "entity": id, "source": bad }),
+                )
+                .unwrap_err();
+            assert!(matches!(err, ToolError::Failed(_)), "{bad}: {err:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn setters_are_undoable() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let id = call_json(&reg, &mut engine, "entity.spawn", json!({ "mesh": cube }))?["entity"]
+            .clone();
+        let before = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        for (tool, args) in [
+            ("entity.set_name", json!({ "entity": id, "name": "n" })),
+            ("entity.set_color", json!({ "entity": id, "color": [0, 1, 0, 1] })),
+            ("entity.set_mesh", json!({ "entity": id, "source": "builtin://sphere" })),
+        ] {
+            crate::command::apply(&reg, &mut engine, tool, args)?;
+        }
+        let after = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        assert_ne!(before, after);
+        for _ in 0..3 {
+            assert!(crate::command::undo(&mut engine)?);
+        }
+        assert_eq!(call_json(&reg, &mut engine, "entity.list", json!({}))?, before);
+        for _ in 0..3 {
+            assert!(crate::command::redo(&mut engine)?);
+        }
+        assert_eq!(call_json(&reg, &mut engine, "entity.list", json!({}))?, after);
         Ok(())
     }
 
