@@ -8,7 +8,7 @@
 
 use engine::app::{self, AppConfig, EcsGame};
 use engine::asset;
-use engine::ecs::{Resources, Schedule, Time, World};
+use engine::ecs::{ExitRequest, Resources, Schedule, Time, World};
 use engine::gpu::GpuContext;
 use engine::math::{Camera, Projection, Transform, Vec3};
 use engine::render::{LightUniform, MeshInstance, RenderState, render_world};
@@ -46,11 +46,12 @@ fn grid_side(count: usize) -> usize {
     (count as f64).sqrt().ceil().max(1.0) as usize
 }
 
-/// Frame system: once `duration` has passed, prints the summary and exits.
-///
-/// The loop has no "request exit" hook, so the benchmark ends the process
-/// directly; nothing needs flushing beyond stdout.
+/// Frame system: once `duration` has passed, prints the summary and sets
+/// [`ExitRequest`], so the window closes and `app::run` returns.
 fn finish_after_duration(_: &mut World, res: &mut Resources) {
+    if res.expect::<ExitRequest>().0 {
+        return;
+    }
     let frame_dt = res.expect::<Time>().frame_dt;
     let bench = res.expect_mut::<Bench>();
     bench.elapsed += frame_dt;
@@ -60,7 +61,7 @@ fn finish_after_duration(_: &mut World, res: &mut Resources) {
     // This runs before `frame_stats_system` (always last), so the summary
     // covers every frame but this one.
     println!("{}", res.expect::<FrameStats>().summary());
-    std::process::exit(0);
+    res.insert(ExitRequest(true));
 }
 
 /// First frame only: builds the [`RenderState`] for the surface format and
