@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "engine": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "engine-mcp"],
+      "env": {}
+    }
+  }
+}
