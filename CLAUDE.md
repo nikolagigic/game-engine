@@ -14,8 +14,9 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 
 ## Roles
 
-- **CEO / Product owner**: sets direction, merges PRs.
-- **Tech lead**: writes tickets, reviews PRs, owns architecture decisions.
+- **CEO / Product owner**: sets direction, pushes `main`.
+- **Tech lead**: writes tickets, reviews branches locally, merges approved
+  work into `main`, owns architecture decisions.
 - **Developers (you)**: implement exactly one ticket per PR, in a worktree.
 
 ## Architecture decisions (summary of the ADRs)
@@ -113,9 +114,11 @@ builds are incremental.
    **Out of scope** turns out to be required, stop and report it; do not
    expand the ticket.
 4. Run the ticket's test command and the full definition of done.
-5. Commit with a message starting `GE-NNN: ` and open a PR against `main`
-   whose description lists each acceptance criterion with a checkbox and how
-   you verified it.
+5. Commit with messages starting `GE-NNN: `. Do not push and do not use
+   `gh`. Send the tech lead a review request (ticket ID, branch, HEAD SHA,
+   each acceptance criterion with its evidence, design decisions, anything
+   unverified). The tech lead reviews the worktree branch locally, may send
+   change requests, and merges approved branches into `main`.
 
 ## Definition of done (every ticket, no exceptions)
 
@@ -127,7 +130,7 @@ builds are incremental.
 - [ ] New public items have a doc comment.
 - [ ] If the ticket adds a user-facing capability and GE-013 is merged: a
       tool is registered for it and tested through `ToolRegistry::call`.
-- [ ] PR opened against `main`, description maps AC to evidence.
+- [ ] Review request sent to the tech lead mapping each AC to evidence.
 
 ## T-shirt sizing (for reference)
 
