@@ -14,6 +14,19 @@ The goal is an MVP that proves one architecture, not a feature list:
 - An engine-native tool registry exposed over **MCP** (`engine-mcp`), so
   agents can build scenes, step the simulation, and look at rendered frames
 
+## Demo
+
+![The demo scene: a field of coloured cubes and spheres around a white pedestal with orbiting satellites](crates/engine/examples/demo.png)
+
+```sh
+cargo run --release --example demo
+```
+
+A 20×20 field of cubes and spheres, a glTF-loaded pedestal with satellites
+orbiting on the fixed-timestep simulation, a directional light, and frame
+stats in the window title. Fly with W/A/S/D and E/Q; hold the right mouse
+button to look around; Escape quits.
+
 ## Status
 
 Pre-alpha. The workspace builds; subsystems land ticket by ticket.
