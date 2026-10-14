@@ -6,9 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 description = "MCP (Model Context Protocol) server exposing the Shin engine's tool registry over stdio."
 
+[lib]
+name = "shin_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "shin-mcp"
 path = "src/main.rs"
+# The library carries the docs; a bin of the same name would collide.
+doc = false
 
 [dependencies]
 shin-engine = { path = "../shin-engine" }

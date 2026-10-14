@@ -15,18 +15,11 @@
 //! `env_logger` filter (e.g. `debug`, `engine=trace`) and overrides
 //! `RUST_LOG`; the default is `info`.
 
-mod engine_thread;
-mod server;
-
 use std::path::PathBuf;
 
 use anyhow::{Context as _, bail};
-use rmcp::ServiceExt as _;
 use shin::headless::Headless;
 use shin::tool::ToolRegistry;
-
-use crate::engine_thread::EngineHandle;
-use crate::server::EngineServer;
 
 /// Frame size without `--project`, `--width`, or `--height`.
 const DEFAULT_SIZE: (u32, u32) = (512, 288);
@@ -100,30 +93,11 @@ fn main() -> anyhow::Result<()> {
     }
     logger.target(env_logger::Target::Stderr).init();
 
-    let registry = ToolRegistry::with_engine_tools();
-    let tools = registry.list();
-    let project = options.project.clone();
-    let engine = EngineHandle::spawn(registry, move || create_engine(&options))?;
-    log::info!(
-        "shin-mcp: headless engine{}, {} tools, serving on stdio",
-        project
-            .map(|dir| format!(" on project {}", dir.display()))
-            .unwrap_or_default(),
-        tools.len()
-    );
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to start the tokio runtime")?;
-    runtime.block_on(async {
-        let service = EngineServer::new(engine, &tools)
-            .serve(rmcp::transport::stdio())
-            .await
-            .context("MCP handshake failed")?;
-        let reason = service.waiting().await?;
-        log::info!("shin-mcp: stopped ({reason:?})");
-        anyhow::Ok(())
+    if let Some(dir) = &options.project {
+        log::info!("shin-mcp: opening project {}", dir.display());
+    }
+    shin_mcp::serve_stdio(ToolRegistry::with_engine_tools(), move || {
+        create_engine(&options)
     })
 }
 

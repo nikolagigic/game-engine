@@ -1,5 +1,6 @@
 //! The engine actor: one OS thread that owns the [`Headless`] engine and the
-//! [`ToolRegistry`] and runs tool calls one at a time.
+//! [`ToolRegistry`] and runs tool calls one at a time, through
+//! [`shin::command::apply`] so they are recorded for undo.
 //!
 //! `Headless` is not `Send` (its `Resources` hold `Box<dyn Any>`), so it
 //! cannot live behind a tokio mutex. Instead it is created on, and never
@@ -54,7 +55,9 @@ impl EngineHandle {
                 };
                 // Ends when every `EngineHandle` (sender) has been dropped.
                 for call in inbox {
-                    let result = registry.call(&mut engine, &call.name, call.args);
+                    // Through the command history, so MCP edits can be undone.
+                    let result =
+                        shin::command::apply(&registry, &mut engine, &call.name, call.args);
                     // The caller may have gone away (cancelled request); fine.
                     let _ = call.reply.send(result);
                 }
