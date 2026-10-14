@@ -1,0 +1,317 @@
+//! The Inspector panel (GE-023): the selected entity's name, transform,
+//! mesh, and colour, editable.
+//!
+//! The panel keeps its own copy of the values being edited, refreshed from
+//! the world every frame except for the field the user is working on.
+//! Drags and colour picks push live previews and one commit when the
+//! pointer is released; text fields commit on Enter or when they lose
+//! focus. Commits become [`Edit`]s that [`crate::editor::EditorCore`] turns
+//! into tool calls through the command history ([`crate::edit`]).
+
+use egui::{DragValue, Ui};
+use shin::ecs::{Entity, Name};
+use shin::headless::Headless;
+use shin::math::Transform;
+use shin::render::{MeshInstance, RenderState};
+use shin::scene::TransformDesc;
+
+use crate::edit::entity_id;
+use crate::ui::Action;
+
+/// One committed inspector change, carried out as one recorded tool call.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Edit {
+    /// `entity.set_name`.
+    Name(Entity, String),
+    /// `entity.set_transform`, after putting `original` back if the value
+    /// was previewed.
+    Transform {
+        /// The entity edited.
+        entity: Entity,
+        /// The new value.
+        desc: TransformDesc,
+        /// The value before the preview started.
+        original: TransformDesc,
+    },
+    /// `entity.set_color`, after putting `original` back.
+    Color {
+        /// The entity edited.
+        entity: Entity,
+        /// The new linear RGBA colour.
+        color: [f32; 4],
+        /// The colour before the preview started.
+        original: [f32; 4],
+    },
+    /// `entity.set_mesh` with an asset source string.
+    Mesh(Entity, String),
+}
+
+/// The Inspector's edit buffers.
+#[derive(Debug, Default)]
+pub struct Inspector {
+    /// The entity the buffers describe.
+    entity: Option<Entity>,
+    name: String,
+    transform: TransformDesc,
+    /// `None` when the entity draws no mesh.
+    color: Option<[f32; 4]>,
+    mesh: String,
+    /// The transform before the preview in progress, if any.
+    transform_origin: Option<TransformDesc>,
+    /// The colour before the preview in progress, if any.
+    color_origin: Option<[f32; 4]>,
+    /// Whether these widgets had keyboard focus last frame (their buffers
+    /// are then not refreshed from the world).
+    name_focused: bool,
+    transform_focused: bool,
+    mesh_focused: bool,
+}
+
+/// The values the inspector shows for `entity`, read from the world.
+struct Current {
+    name: String,
+    transform: Option<TransformDesc>,
+    color: Option<[f32; 4]>,
+    mesh: String,
+}
+
+impl Current {
+    fn read(engine: &Headless, entity: Entity) -> Self {
+        let world = &engine.world;
+        let instance = world.get::<&MeshInstance>(entity).ok().map(|i| *i);
+        let mesh = instance
+            .and_then(|i| {
+                let state = engine.resources.get::<RenderState>()?;
+                state.registry.source(i.mesh).map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        Self {
+            name: world
+                .get::<&Name>(entity)
+                .map(|n| n.0.clone())
+                .unwrap_or_default(),
+            transform: world
+                .get::<&Transform>(entity)
+                .ok()
+                .map(|t| TransformDesc::from_transform(&t)),
+            color: instance.map(|i| i.color),
+            mesh,
+        }
+    }
+}
+
+impl Inspector {
+    /// Commits a preview still in progress (as when the selection changes
+    /// mid-drag) so it is not left unrecorded.
+    fn flush(&mut self, actions: &mut Vec<Action>) {
+        let Some(entity) = self.entity else {
+            return;
+        };
+        if let Some(original) = self.transform_origin.take()
+            && original != self.transform
+        {
+            actions.push(Action::Edit(Edit::Transform {
+                entity,
+                desc: self.transform,
+                original,
+            }));
+        }
+        if let (Some(original), Some(color)) = (self.color_origin.take(), self.color)
+            && original != color
+        {
+            actions.push(Action::Edit(Edit::Color {
+                entity,
+                color,
+                original,
+            }));
+        }
+    }
+
+    /// Draws the panel for `selected` and pushes previews and commits onto
+    /// `actions`.
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        engine: &Headless,
+        selected: Option<Entity>,
+        actions: &mut Vec<Action>,
+    ) {
+        let selected = selected.filter(|&e| engine.world.contains(e));
+        if selected != self.entity {
+            self.flush(actions);
+            *self = Self {
+                entity: selected,
+                ..Self::default()
+            };
+        }
+        let Some(entity) = selected else {
+            ui.weak("Select an entity");
+            return;
+        };
+        self.refresh(&Current::read(engine, entity));
+
+        ui.label(format!("Entity #{}", entity_id(entity)));
+        egui::Grid::new("inspector_grid")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                self.name_row(ui, entity, actions);
+                self.transform_rows(ui, entity, actions);
+                self.mesh_row(ui, engine, entity, actions);
+                self.color_row(ui, entity, actions);
+            });
+
+        // A drag or colour pick ends when the pointer is released; a typed
+        // number ends when its field loses focus.
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        if !pointer_down && !self.transform_focused {
+            self.flush(actions);
+        }
+    }
+
+    /// Takes the world's values into every buffer that is not being edited.
+    fn refresh(&mut self, current: &Current) {
+        if !self.name_focused {
+            self.name.clone_from(&current.name);
+        }
+        if self.transform_origin.is_none()
+            && !self.transform_focused
+            && let Some(transform) = current.transform
+        {
+            self.transform = transform;
+        }
+        if self.color_origin.is_none() {
+            self.color = current.color;
+        }
+        if !self.mesh_focused {
+            self.mesh.clone_from(&current.mesh);
+        }
+    }
+
+    fn name_row(&mut self, ui: &mut Ui, entity: Entity, actions: &mut Vec<Action>) {
+        ui.label("Name");
+        let response = ui.text_edit_singleline(&mut self.name);
+        if response.lost_focus() {
+            actions.push(Action::Edit(Edit::Name(entity, self.name.clone())));
+        }
+        self.name_focused = response.has_focus();
+        ui.end_row();
+    }
+
+    fn transform_rows(&mut self, ui: &mut Ui, entity: Entity, actions: &mut Vec<Action>) {
+        let before = self.transform;
+        let mut focused = false;
+        let rows: [(&str, &mut [f32; 3], f64); 3] = [
+            ("Translation", &mut self.transform.translation, 0.05),
+            ("Rotation (°)", &mut self.transform.rotation_euler_deg, 1.0),
+            ("Scale", &mut self.transform.scale, 0.01),
+        ];
+        for (label, values, speed) in rows {
+            ui.label(label);
+            ui.horizontal(|ui| {
+                for value in values.iter_mut() {
+                    let response = ui.add(
+                        DragValue::new(value)
+                            .speed(speed)
+                            .max_decimals(3)
+                            .update_while_editing(false),
+                    );
+                    focused |= response.has_focus();
+                }
+            });
+            ui.end_row();
+        }
+        self.transform_focused = focused;
+        if self.transform != before {
+            self.transform_origin.get_or_insert(before);
+            actions.push(Action::PreviewTransform(entity, self.transform));
+        }
+    }
+
+    fn mesh_row(
+        &mut self,
+        ui: &mut Ui,
+        engine: &Headless,
+        entity: Entity,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.label("Mesh");
+        ui.horizontal(|ui| {
+            let mut sources: Vec<String> = engine
+                .resources
+                .get::<RenderState>()
+                .map(|state| {
+                    state
+                        .registry
+                        .iter()
+                        .filter_map(|(handle, _)| state.registry.source(handle))
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for builtin in ["builtin://cube", "builtin://sphere"] {
+                if !sources.iter().any(|s| s == builtin) {
+                    sources.push(builtin.to_string());
+                }
+            }
+            sources.sort();
+            sources.dedup();
+            let current = self.mesh.clone();
+            egui::ComboBox::from_id_salt("inspector_mesh")
+                .selected_text(if current.is_empty() {
+                    "(none)"
+                } else {
+                    &current
+                })
+                .show_ui(ui, |ui| {
+                    for source in &sources {
+                        if ui.selectable_label(*source == current, source).clicked()
+                            && *source != current
+                        {
+                            actions.push(Action::Edit(Edit::Mesh(entity, source.clone())));
+                        }
+                    }
+                });
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.mesh)
+                    .hint_text("asset source")
+                    .desired_width(120.0),
+            );
+            if response.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !self.mesh.trim().is_empty()
+            {
+                actions.push(Action::Edit(Edit::Mesh(
+                    entity,
+                    self.mesh.trim().to_string(),
+                )));
+            }
+            self.mesh_focused = response.has_focus();
+        });
+        ui.end_row();
+    }
+
+    fn color_row(&mut self, ui: &mut Ui, entity: Entity, actions: &mut Vec<Action>) {
+        let Some(color) = self.color else {
+            return;
+        };
+        ui.label("Colour");
+        let [r, g, b, a] = color;
+        // `Rgba` is linear, like the component.
+        let mut rgba = egui::Rgba::from_rgba_unmultiplied(r, g, b, a);
+        let response = egui::widgets::color_picker::color_edit_button_rgba(
+            ui,
+            &mut rgba,
+            egui::widgets::color_picker::Alpha::OnlyBlend,
+        );
+        if response.changed() {
+            let new = rgba.to_rgba_unmultiplied();
+            if new != color {
+                self.color_origin.get_or_insert(color);
+                self.color = Some(new);
+                actions.push(Action::PreviewColor(entity, new));
+            }
+        }
+        ui.end_row();
+    }
+}

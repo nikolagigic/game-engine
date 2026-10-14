@@ -2,8 +2,9 @@
 //! [`OffscreenTarget`], and paint the UI over the output view.
 //!
 //! [`EditorCore`] owns a [`Headless`] engine (on a clone of the window's
-//! GPU context) and a [`ToolRegistry`]; every edit (console line, undo,
-//! redo) goes through the engine's command history ([`shin::command`]).
+//! GPU context) with the project open, and a [`ToolRegistry`]; every edit
+//! (console line, scene panel, inspector, undo, redo) goes through the
+//! engine's command history ([`shin::command`], via [`crate::edit`]).
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
@@ -14,20 +15,25 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use egui_dock::DockState;
+use serde_json::{Value, json};
 use shin::app::{AppConfig, Game};
-use shin::command;
+use shin::asset::AssetSource;
+use shin::command::{self, History};
+use shin::ecs::{Entity, Name};
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
 use shin::headless::Headless;
 use shin::math::Camera;
 use shin::project::Project;
-use shin::render::begin_mesh_pass;
+use shin::render::{MeshInstance, begin_mesh_pass};
 use shin::tool::{ToolOutput, ToolRegistry};
 use winit::window::Window;
 
+use crate::edit;
+use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
 use crate::scene;
-use crate::ui::{self, Action, Console, EditorUi, Tab, Viewport};
+use crate::ui::{self, Action, Console, EditorUi, Fields, Selection, Tab, Viewport};
 
 /// Editor window size in logical pixels, and the `--screenshot` size in
 /// pixels (screenshots render at one pixel per point).
@@ -56,10 +62,24 @@ pub struct EditorCore {
     viewport_texture: Option<ViewportTexture>,
     console: Console,
     quit: bool,
+    /// The open project's manifest.
+    project: Project,
+    selection: Selection,
+    inspector: Inspector,
+    fields: Fields,
+    /// The scene file Save writes, relative to the project.
+    scene_path: String,
+    /// The undo stack (`(tool, args)`) when the scene was last opened or
+    /// saved; the scene is unsaved while the stack differs from it.
+    saved: Vec<(String, Value)>,
 }
 
+/// How much the selected entity's colour is mixed toward white in the
+/// viewport (render only; the component keeps its colour).
+const HIGHLIGHT: f32 = 0.5;
+
 impl EditorCore {
-    /// An editor showing the starter scene of the project in `project_dir`,
+    /// An editor on the project in `project_dir`, showing its entry scene,
     /// drawing its UI with `egui` and its Log panel from `log`.
     pub fn new(
         gpu: &GpuContext,
@@ -67,9 +87,9 @@ impl EditorCore {
         project_dir: &Path,
         log: LogBuffer,
     ) -> anyhow::Result<Self> {
-        // 1x1 until the Viewport panel has been laid out and asks for a size.
+        // The target is resized to the Viewport panel once it is laid out.
         let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
-        scene::build(&mut engine, project_dir)?;
+        let project = scene::open(&mut engine, project_dir)?;
         Ok(Self {
             egui,
             renderer: None,
@@ -82,6 +102,12 @@ impl EditorCore {
             viewport_texture: None,
             console: Console::default(),
             quit: false,
+            scene_path: scene::default_path(&project),
+            project,
+            selection: Selection::default(),
+            inspector: Inspector::default(),
+            fields: Fields::default(),
+            saved: Vec::new(),
         })
     }
 
@@ -100,6 +126,7 @@ impl EditorCore {
     ) -> egui::PlatformOutput {
         let egui_ctx = self.egui.clone();
         let mut actions = Vec::new();
+        self.drop_dead_selection();
         let mut full = egui_ctx.run_ui(input, |ui| {
             EditorUi {
                 engine: &self.engine,
@@ -107,6 +134,10 @@ impl EditorCore {
                 orbit: &mut self.orbit,
                 viewport: &mut self.viewport,
                 console: &mut self.console,
+                selection: &mut self.selection,
+                inspector: &mut self.inspector,
+                fields: &mut self.fields,
+                scene_path: &self.scene_path,
                 actions: &mut actions,
                 quit: &mut self.quit,
             }
@@ -129,7 +160,7 @@ impl EditorCore {
         if self.viewport_texture.is_some() {
             self.orbit
                 .apply(self.engine.resources.expect_mut::<Camera>());
-            self.engine.render_to_target();
+            render_scene(&mut self.engine, self.selection.0);
         }
 
         let screen = egui_wgpu::ScreenDescriptor {
@@ -179,19 +210,38 @@ impl EditorCore {
         full.platform_output
     }
 
+    /// Clears the selection if its entity no longer exists (deleted, or
+    /// its spawn undone).
+    fn drop_dead_selection(&mut self) {
+        if self
+            .selection
+            .0
+            .is_some_and(|e| !self.engine.world.contains(e))
+        {
+            self.selection.0 = None;
+        }
+    }
+
     /// Carries out what the UI asked for. Results and errors go to the log
     /// and, for console lines, to the console transcript.
     fn run(&mut self, action: Action) {
+        if let Err(err) = self.try_run(action) {
+            log::error!("{err:#}");
+        }
+    }
+
+    /// [`Self::run`], returning the error instead of logging it.
+    fn try_run(&mut self, action: Action) -> anyhow::Result<()> {
+        let reg = &self.registry;
+        let engine = &mut self.engine;
         match action {
-            Action::Undo => match command::undo(&mut self.engine) {
-                Ok(true) => log::info!("undo"),
-                Ok(false) => log::info!("nothing to undo"),
-                Err(err) => log::error!("{err:#}"),
+            Action::Undo => match command::undo(engine)? {
+                true => log::info!("undo"),
+                false => log::info!("nothing to undo"),
             },
-            Action::Redo => match command::redo(&mut self.engine) {
-                Ok(true) => log::info!("redo"),
-                Ok(false) => log::info!("nothing to redo"),
-                Err(err) => log::error!("{err:#}"),
+            Action::Redo => match command::redo(engine)? {
+                true => log::info!("redo"),
+                false => log::info!("nothing to redo"),
             },
             Action::Console(line) => {
                 let reply = self.run_console_line(&line);
@@ -201,7 +251,112 @@ impl EditorCore {
                 }
                 self.console.record(line, reply);
             }
+            Action::Spawn(source) => {
+                let name = spawn_name(&source);
+                let entity = edit::spawn(reg, engine, &source, self.orbit.target, name.as_deref())?;
+                self.selection.0 = Some(entity);
+            }
+            Action::Despawn(entity) => {
+                edit::despawn(reg, engine, entity)?;
+                self.drop_dead_selection();
+            }
+            Action::PreviewTransform(entity, desc) => {
+                edit::preview_transform(engine, entity, &desc);
+            }
+            Action::PreviewColor(entity, color) => edit::preview_color(engine, entity, color),
+            Action::Edit(Edit::Name(entity, name)) => {
+                let current = engine
+                    .world
+                    .get::<&Name>(entity)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_default();
+                if name != current {
+                    edit::commit_name(reg, engine, entity, &name)?;
+                }
+            }
+            Action::Edit(Edit::Transform {
+                entity,
+                desc,
+                original,
+            }) => {
+                edit::preview_transform(engine, entity, &original);
+                edit::commit_transform(reg, engine, entity, &desc)?;
+            }
+            Action::Edit(Edit::Color {
+                entity,
+                color,
+                original,
+            }) => {
+                edit::preview_color(engine, entity, original);
+                edit::commit_color(reg, engine, entity, color)?;
+            }
+            Action::Edit(Edit::Mesh(entity, source)) => {
+                edit::commit_mesh(reg, engine, entity, &source)?;
+            }
+            Action::Open => self.open()?,
+            Action::Save => self.save_as(self.scene_path.clone())?,
+            Action::SaveAs(path) => self.save_as(path)?,
         }
+        Ok(())
+    }
+
+    /// File > Open: loads the project's entry scene (not an undoable edit:
+    /// the history starts over) and makes it the scene Save writes.
+    fn open(&mut self) -> anyhow::Result<()> {
+        let path = scene::default_path(&self.project);
+        self.registry
+            .call(&mut self.engine, "scene.load", json!({ "path": path }))
+            .with_context(|| format!("opening {path}"))?;
+        self.engine.resources.insert(History::default());
+        self.selection.0 = None;
+        self.saved.clear();
+        log::info!("opened {path}");
+        self.scene_path = path;
+        Ok(())
+    }
+
+    /// File > Save and Save As: writes the scene to `path` (relative to the
+    /// project) with `scene.save` and makes it the scene Save writes.
+    fn save_as(&mut self, path: String) -> anyhow::Result<()> {
+        self.registry
+            .call(&mut self.engine, "scene.save", json!({ "path": path }))
+            .with_context(|| format!("saving {path}"))?;
+        self.saved = self.undo_stack();
+        log::info!("saved {path}");
+        self.scene_path = path;
+        Ok(())
+    }
+
+    /// The command history's undo stack as `(tool, args)`.
+    fn undo_stack(&self) -> Vec<(String, Value)> {
+        self.engine
+            .resources
+            .get::<History>()
+            .map(|h| {
+                h.undo_entries()
+                    .map(|(tool, args)| (tool.to_string(), args.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the scene has edits that were not saved: the undo stack
+    /// differs from what it was at the last open or save.
+    pub fn is_dirty(&self) -> bool {
+        let Some(history) = self.engine.resources.get::<History>() else {
+            return !self.saved.is_empty();
+        };
+        history.undo_len() != self.saved.len()
+            || history.undo_entries().zip(&self.saved).any(
+                |((tool, args), (saved_tool, saved_args))| tool != saved_tool || args != saved_args,
+            )
+    }
+
+    /// The window title: the project's, with `*` while there are unsaved
+    /// edits.
+    pub fn title(&self) -> String {
+        let dirty = if self.is_dirty() { "*" } else { "" };
+        format!("{}{dirty} — Shin Editor", self.project.window.title)
     }
 
     /// Runs `<tool.name> [json args]` through the command history and
@@ -237,7 +392,10 @@ fn sync_viewport_texture(
     if width == 0 || height == 0 {
         return;
     }
-    if slot.as_ref().is_some_and(|v| v.size == [width, height]) {
+    // Opening a project resizes the target behind the slot's back, so
+    // compare against the target too.
+    let target_matches = (engine.target.width, engine.target.height) == (width, height);
+    if target_matches && slot.as_ref().is_some_and(|v| v.size == [width, height]) {
         return;
     }
 
@@ -268,9 +426,48 @@ fn sync_viewport_texture(
     });
 }
 
-/// The window title for `project`.
+/// Renders `engine`'s scene into its target with `selected` tinted toward
+/// white. The tint is put back right after the render, so the component,
+/// the history, and saved scenes never see it.
+fn render_scene(engine: &mut Headless, selected: Option<Entity>) {
+    let tinted = selected.and_then(|entity| {
+        let instance = engine
+            .world
+            .query_one_mut::<&mut MeshInstance>(entity)
+            .ok()?;
+        let original = instance.color;
+        instance.color = highlight(original);
+        Some((entity, original))
+    });
+    engine.render_to_target();
+    if let Some((entity, original)) = tinted {
+        edit::preview_color(engine, entity, original);
+    }
+}
+
+/// The window title for `project` before anything is edited.
 fn title(project: &Project) -> String {
     format!("{} — Shin Editor", project.window.title)
+}
+
+/// `color` mixed [`HIGHLIGHT`] of the way toward white (alpha kept).
+fn highlight([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+    let mix = |c: f32| c + (1.0 - c) * HIGHLIGHT;
+    [mix(r), mix(g), mix(b), a]
+}
+
+/// The name an entity added from `source` gets: the built-in's name or the
+/// file stem (`builtin://cube` gives `cube`, `assets/crate.gltf#1` gives
+/// `crate`).
+fn spawn_name(source: &str) -> Option<String> {
+    match AssetSource::parse(source).ok()? {
+        AssetSource::Builtin(name) => Some(name),
+        AssetSource::File { path, .. }
+        | AssetSource::Image { path }
+        | AssetSource::GltfImage { path, .. } => {
+            Some(path.file_stem()?.to_string_lossy().into_owned())
+        }
+    }
 }
 
 /// The windowed editor: an [`EditorCore`] fed by egui-winit.
@@ -354,6 +551,15 @@ impl Game for EditorApp {
     fn exit_requested(&self) -> bool {
         self.core.as_ref().is_some_and(EditorCore::quit_requested)
     }
+
+    /// Escape clears the selection instead of closing the editor.
+    fn handles_escape(&self) -> bool {
+        true
+    }
+
+    fn title(&self) -> Option<String> {
+        self.core.as_ref().map(EditorCore::title)
+    }
 }
 
 /// Opens the editor window on the project in `project_dir` and runs until
@@ -426,7 +632,9 @@ pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shin::math::Transform;
     use shin::project::{self, NewProjectOptions};
+    use shin::scene::TransformDesc;
 
     /// One frame at [`WINDOW_SIZE`] with `events` as the input.
     fn frame(
@@ -514,5 +722,271 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
+    }
+
+    /// A fresh demo project in a temp dir named after `label`; returns the
+    /// temp root (to delete) and the project directory.
+    fn demo_project(label: &str) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+        let root =
+            std::env::temp_dir().join(format!("shin-editor-{label}-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_dir = root.join("demo");
+        project::create(&NewProjectOptions {
+            name: "demo".to_string(),
+            dir: project_dir.clone(),
+            engine: Default::default(),
+        })?;
+        Ok((root, project_dir))
+    }
+
+    /// A key press with no modifiers.
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// `entity.list`, without the ids (which a reload changes).
+    fn entities(core: &mut EditorCore) -> anyhow::Result<Vec<serde_json::Value>> {
+        let ToolOutput::Json(serde_json::Value::Array(mut rows)) =
+            core.registry
+                .call(&mut core.engine, "entity.list", json!({}))?
+        else {
+            anyhow::bail!("entity.list returned no array");
+        };
+        for row in &mut rows {
+            row.as_object_mut().unwrap().remove("entity");
+        }
+        Ok(rows)
+    }
+
+    /// The entity named `name`.
+    fn named(core: &EditorCore, name: &str) -> Entity {
+        core.engine
+            .world
+            .query::<(Entity, &Name)>()
+            .iter()
+            .find(|(_, n)| n.0 == name)
+            .map(|(e, _)| e)
+            .unwrap_or_else(|| panic!("no entity named {name}"))
+    }
+
+    /// The ticket's screenshot test: after `entity.spawn` through the
+    /// console, the Scene panel region of the frame changes (a new row).
+    #[test]
+    fn scene_panel_shows_a_console_spawn() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("scene-panel")?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        // The Scene panel is the left 18% below the menu bar.
+        let scene_panel = |core: &mut EditorCore| -> anyhow::Result<image::RgbaImage> {
+            for _ in 0..2 {
+                frame(core, &gpu, &target, Vec::new());
+            }
+            let image = target.read_pixels(&gpu)?;
+            Ok(image::imageops::crop_imm(&image, 0, 30, 270, 300).to_image())
+        };
+        let before = scene_panel(&mut core)?;
+
+        core.run(Action::Console(
+            r#"entity.spawn {"mesh": 0, "translation": [0, 2, 0]}"#.to_string(),
+        ));
+        assert!(matches!(core.console.transcript.last(), Some((_, Ok(_)))));
+        let after = scene_panel(&mut core)?;
+        let changed = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 20, "the scene panel changed ({changed} pixels)");
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Runs `preview` (a drag in progress), if any, then `action`, and
+    /// checks undo restores the entity list from before both and redo the
+    /// one after.
+    fn run_undo_redo(
+        core: &mut EditorCore,
+        preview: Option<Action>,
+        action: Action,
+    ) -> anyhow::Result<()> {
+        let label = format!("{action:?}");
+        let before = entities(core)?;
+        if let Some(preview) = preview {
+            core.try_run(preview)?;
+        }
+        core.try_run(action)?;
+        let after = entities(core)?;
+        assert_ne!(before, after, "{label} changed something");
+        core.try_run(Action::Undo)?;
+        assert_eq!(entities(core)?, before, "{label} is undone");
+        core.try_run(Action::Redo)?;
+        assert_eq!(entities(core)?, after, "{label} is redone");
+        Ok(())
+    }
+
+    /// The ticket's round trip without a window: add, rename, move,
+    /// rescale, recolour, change mesh, delete (each undone and redone),
+    /// save, then edit and reopen.
+    #[test]
+    fn edit_save_reopen_round_trip() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("round-trip")?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        assert_eq!(entities(&mut core)?.len(), 2, "the entry scene is open");
+        assert!(!core.is_dirty());
+        assert!(!core.title().contains('*'));
+
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Spawn("builtin://sphere".to_string()),
+        )?;
+        let ball = named(&core, "sphere");
+        assert_eq!(core.selection.0, Some(ball), "the new entity is selected");
+        assert_eq!(
+            core.engine.world.get::<&Transform>(ball)?.translation,
+            core.orbit.target,
+            "added at the orbit target"
+        );
+        assert!(core.is_dirty() && core.title().contains('*'));
+
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Name(ball, "ball".to_string())),
+        )?;
+        let original = TransformDesc::from_transform(&*core.engine.world.get::<&Transform>(ball)?);
+        let moved = TransformDesc {
+            translation: [2.0, 1.0, -1.0],
+            scale: [0.5, 0.5, 0.5],
+            ..original
+        };
+        // A drag: a preview, then one commit.
+        run_undo_redo(
+            &mut core,
+            Some(Action::PreviewTransform(ball, moved)),
+            Action::Edit(Edit::Transform {
+                entity: ball,
+                desc: moved,
+                original,
+            }),
+        )?;
+        let white = core.engine.world.get::<&MeshInstance>(ball)?.color;
+        run_undo_redo(
+            &mut core,
+            Some(Action::PreviewColor(ball, [0.0, 0.0, 0.5, 1.0])),
+            Action::Edit(Edit::Color {
+                entity: ball,
+                color: [0.0, 0.0, 1.0, 1.0],
+                original: white,
+            }),
+        )?;
+        let cube = named(&core, "cube");
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Mesh(cube, "builtin://sphere".to_string())),
+        )?;
+        let ground = named(&core, "ground");
+        core.selection.0 = Some(ground);
+        run_undo_redo(&mut core, None, Action::Despawn(ground))?;
+        core.drop_dead_selection();
+        assert_eq!(core.selection.0, None, "deleting clears the selection");
+
+        let edited = entities(&mut core)?;
+        core.try_run(Action::Save)?;
+        assert!(!core.is_dirty() && !core.title().contains('*'));
+        let saved = std::fs::read_to_string(project_dir.join("scenes/main.scene.ron"))?;
+        assert!(saved.contains(r#"name: "ball""#), "{saved}");
+        assert!(saved.contains("translation: (2.0, 1.0, -1.0)"), "{saved}");
+        assert!(saved.contains("scale: (0.5, 0.5, 0.5)"), "{saved}");
+        assert!(saved.contains("color: (0.0, 0.0, 1.0, 1.0)"), "{saved}");
+        assert_eq!(saved.matches("builtin://sphere").count(), 2, "{saved}");
+        assert!(!saved.contains("ground"), "{saved}");
+
+        // An unsaved edit, then reopen: back to what was saved.
+        core.try_run(Action::Despawn(named(&core, "ball")))?;
+        assert!(core.is_dirty());
+        core.try_run(Action::Open)?;
+        assert_eq!(entities(&mut core)?, edited);
+        assert!(!core.is_dirty());
+
+        core.try_run(Action::SaveAs("scenes/copy.scene.ron".to_string()))?;
+        assert_eq!(core.scene_path, "scenes/copy.scene.ron");
+        assert!(project_dir.join("scenes/copy.scene.ron").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Escape clears the selection, Delete deletes the selected entity,
+    /// and the selection highlight never reaches the component.
+    #[test]
+    fn keys_and_highlight() -> anyhow::Result<()> {
+        let (root, project_dir) = demo_project("keys")?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        let cube = named(&core, "cube");
+        let color = core.engine.world.get::<&MeshInstance>(cube)?.color;
+        core.selection.0 = Some(cube);
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert_eq!(
+            core.engine.world.get::<&MeshInstance>(cube)?.color,
+            color,
+            "the highlight is render-only"
+        );
+        frame(&mut core, &gpu, &target, vec![key(egui::Key::Escape)]);
+        assert_eq!(core.selection.0, None, "Escape clears the selection");
+
+        core.selection.0 = Some(cube);
+        frame(&mut core, &gpu, &target, vec![key(egui::Key::Delete)]);
+        assert!(!core.engine.world.contains(cube), "Delete deletes it");
+        frame(&mut core, &gpu, &target, Vec::new());
+        assert_eq!(core.selection.0, None);
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert!(core.engine.world.contains(cube), "and is undoable");
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_names_come_from_the_source() {
+        assert_eq!(spawn_name("builtin://cube").as_deref(), Some("cube"));
+        assert_eq!(spawn_name("assets/crate.gltf#1").as_deref(), Some("crate"));
+        assert_eq!(spawn_name("bad://x"), None);
+    }
+
+    #[test]
+    fn highlight_mixes_toward_white() {
+        assert_eq!(highlight([0.0, 0.5, 1.0, 0.25]), [0.5, 0.75, 1.0, 0.25]);
     }
 }

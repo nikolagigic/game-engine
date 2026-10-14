@@ -11,7 +11,9 @@
 //! `--screenshot <png>` renders one full editor frame without a window,
 //! writes it to `<png>`, and exits; tests use it.
 
+mod edit;
 mod editor;
+mod inspector;
 mod log_sink;
 mod orbit;
 mod scene;
