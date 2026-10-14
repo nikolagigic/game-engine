@@ -6,7 +6,8 @@
 //! [`Game::render`].
 //!
 //! [`EcsGame`] is a ready-made [`Game`] for applications that are "a world
-//! plus systems" (see [`crate::ecs`]).
+//! plus systems" (see [`crate::ecs`]). It keeps an
+//! [`InputState`] resource up to date.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,13 +15,14 @@ use std::time::Instant;
 use anyhow::Context as _;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::ecs::{Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, SurfaceTarget};
+use crate::input::InputState;
 
 /// Longest frame time fed to the simulation, in seconds. Longer frames (a
 /// breakpoint, a dragged window) are clamped so the loop never tries to
@@ -80,9 +82,21 @@ pub trait Game {
         let _ = event;
     }
 
+    /// Every raw device event (for example unaccelerated mouse motion,
+    /// which keeps arriving while the cursor is grabbed).
+    fn on_device_event(&mut self, event: &DeviceEvent) {
+        let _ = event;
+    }
+
     /// Polled once per frame; returning `Some` sets the window title.
     fn title(&self) -> Option<String> {
         None
+    }
+
+    /// Polled once per frame; `true` grabs and hides the cursor, `false`
+    /// releases and shows it. The cursor is always released on exit.
+    fn cursor_grabbed(&self) -> bool {
+        false
     }
 }
 
@@ -97,6 +111,10 @@ pub type RenderFn = Box<dyn FnMut(&mut World, &mut Resources, &GpuContext, &wgpu
 /// then runs the schedule's fixed systems; each [`render`](Game::render)
 /// records `frame_dt` and `alpha`, runs the frame systems, and finally
 /// calls [`render_fn`](Self::render_fn) if one is set.
+///
+/// It also owns input: an [`InputState`] resource receives every window and
+/// device event, is reset with [`InputState::end_frame`] after the frame
+/// systems, and its `cursor_grabbed` flag drives the window cursor.
 pub struct EcsGame {
     /// Entities and components.
     pub world: World,
@@ -116,11 +134,12 @@ impl Default for EcsGame {
 }
 
 impl EcsGame {
-    /// A game over `world` driven by `schedule`, with a default [`Time`]
-    /// resource and no render callback.
+    /// A game over `world` driven by `schedule`, with default [`Time`] and
+    /// [`InputState`] resources and no render callback.
     pub fn new(world: World, schedule: Schedule) -> Self {
         let mut resources = Resources::new();
         resources.insert(Time::default());
+        resources.insert(InputState::default());
         Self {
             world,
             resources,
@@ -140,7 +159,8 @@ impl EcsGame {
     }
 
     /// The GPU-independent half of [`Game::render`]: updates `frame_dt`
-    /// and `alpha` in [`Time`], then runs the frame systems.
+    /// and `alpha` in [`Time`], runs the frame systems, then ends the input
+    /// frame.
     fn begin_frame(&mut self, alpha: f64) {
         let now = Instant::now();
         let frame_dt = self
@@ -153,6 +173,9 @@ impl EcsGame {
         time.alpha = alpha;
         self.schedule
             .run_frame(&mut self.world, &mut self.resources);
+        if let Some(input) = self.resources.get_mut::<InputState>() {
+            input.end_frame();
+        }
     }
 }
 
@@ -171,6 +194,24 @@ impl Game for EcsGame {
         if let Some(render_fn) = &mut self.render_fn {
             render_fn(&mut self.world, &mut self.resources, ctx, view);
         }
+    }
+
+    fn on_window_event(&mut self, event: &WindowEvent) {
+        if let Some(input) = self.resources.get_mut::<InputState>() {
+            input.handle_window_event(event);
+        }
+    }
+
+    fn on_device_event(&mut self, event: &DeviceEvent) {
+        if let Some(input) = self.resources.get_mut::<InputState>() {
+            input.handle_device_event(event);
+        }
+    }
+
+    fn cursor_grabbed(&self) -> bool {
+        self.resources
+            .get::<InputState>()
+            .is_some_and(|input| input.cursor_grabbed)
     }
 }
 
@@ -255,6 +296,35 @@ struct Running {
     window: Arc<Window>,
     gpu: GpuContext,
     target: SurfaceTarget<'static>,
+    /// Cursor grab state last applied to the window.
+    cursor_grabbed: bool,
+}
+
+impl Running {
+    /// Grabs and hides the cursor, or releases and shows it. Tries
+    /// `Confined` first and falls back to `Locked` (macOS only supports
+    /// `Locked`); a failed grab is logged and the cursor stays visible.
+    fn set_cursor_grabbed(&mut self, grabbed: bool) {
+        if grabbed == self.cursor_grabbed {
+            return;
+        }
+        self.cursor_grabbed = grabbed;
+        if grabbed {
+            let result = self
+                .window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked));
+            match result {
+                Ok(()) => self.window.set_cursor_visible(false),
+                Err(err) => log::warn!("could not grab the cursor: {err}"),
+            }
+        } else {
+            if let Err(err) = self.window.set_cursor_grab(CursorGrabMode::None) {
+                log::warn!("could not release the cursor: {err}");
+            }
+            self.window.set_cursor_visible(true);
+        }
+    }
 }
 
 struct Runner<G> {
@@ -296,6 +366,7 @@ impl<G: Game> Runner<G> {
             window,
             gpu,
             target,
+            cursor_grabbed: false,
         });
         Ok(())
     }
@@ -370,6 +441,7 @@ impl<G: Game> Runner<G> {
             state.window.set_title(&title);
             self.title = Some(title);
         }
+        state.set_cursor_grabbed(self.game.cursor_grabbed());
         state.window.request_redraw();
         Ok(())
     }
@@ -420,7 +492,19 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.game.on_device_event(&event);
+    }
+
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = &mut self.state {
+            state.set_cursor_grabbed(false);
+        }
         self.state = None;
     }
 }
@@ -518,6 +602,38 @@ mod tests {
         assert!(time.frame_dt >= 0.005, "frame_dt = {}", time.frame_dt);
         assert_eq!(time.fixed_steps, 0, "frames do not step the simulation");
         assert_eq!(*game.resources.expect::<u32>(), 2);
+    }
+
+    /// Records the mouse delta the frame systems saw.
+    fn record_mouse(_: &mut World, res: &mut Resources) {
+        let delta = res.expect::<InputState>().mouse_delta;
+        res.insert(Some(delta));
+    }
+
+    #[test]
+    fn ecs_game_forwards_input_and_ends_frame_after_frame_systems() {
+        use crate::math::Vec2;
+
+        let mut schedule = Schedule::new();
+        schedule.add_frame("record_mouse", record_mouse);
+        let mut game = EcsGame::new(World::new(), schedule);
+        game.on_device_event(&DeviceEvent::MouseMotion { delta: (4.0, -2.0) });
+        assert!(!game.cursor_grabbed());
+
+        game.begin_frame(0.0);
+        assert_eq!(
+            game.resources.expect::<Option<Vec2>>(),
+            &Some(Vec2::new(4.0, -2.0)),
+            "frame systems see this frame's input"
+        );
+        assert_eq!(
+            game.resources.expect::<InputState>().mouse_delta,
+            Vec2::ZERO,
+            "end_frame ran after the frame systems"
+        );
+
+        game.resources.expect_mut::<InputState>().cursor_grabbed = true;
+        assert!(game.cursor_grabbed());
     }
 
     #[test]
