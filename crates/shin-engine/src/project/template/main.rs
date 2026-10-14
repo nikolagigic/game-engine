@@ -1,18 +1,32 @@
-//! A Shin starter game: a lit cube on a ground slab, viewed through the
-//! free-fly camera. The window title and size come from `shin.toml`.
+//! A Shin starter game: a lit cube on a ground slab with a small moon
+//! orbiting it, viewed through the free-fly camera. The window title and
+//! size come from `shin.toml`; the scene is `scenes/main.scene.ron`.
+//!
+//! ```text
+//! cargo run            play in a window
+//! cargo run -- --mcp   serve this game to an agent over MCP (stdio)
+//! ```
+//!
+//! Both modes build the same world, systems ([`game_schedule`]), and
+//! resources, so whatever an agent sees under `--mcp` is the game itself.
 //!
 //! Controls: W/S forward and back, A/D strafe, E/Q up and down; hold the
 //! right mouse button to look around; Escape quits.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use shin::app::{self, AppConfig, EcsGame};
-use shin::asset::{self, MeshData};
-use shin::ecs::{Resources, Schedule, World};
+use shin::asset::Assets;
+use shin::ecs::{ExitRequest, Name, Resources, Schedule, Time, World};
+use shin::gpu::GpuContext;
+use shin::headless::Headless;
 use shin::input::{FlyCamera, fly_camera_system};
-use shin::math::{Camera, Projection, Quat, Transform, Vec3};
+use shin::math::{Camera, Projection, Transform, Vec3};
 use shin::project::Project;
-use shin::render::{LightUniform, MeshInstance, RenderState, render_world};
+use shin::render::{RenderState, render_world};
+use shin::scene;
+use shin::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// The project's root directory, where `shin.toml` and `assets/` live.
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -25,94 +39,145 @@ const SKY: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-/// Loads the first mesh of `assets/cube.gltf`.
-fn load_cube() -> anyhow::Result<MeshData> {
-    let mut scene = asset::load_gltf(Path::new(ROOT).join("assets/cube.gltf"))?;
-    anyhow::ensure!(!scene.meshes.is_empty(), "assets/cube.gltf has no mesh");
-    Ok(scene.meshes.swap_remove(0))
+/// The name of the entity [`orbit_system`] moves; the starter scene has one.
+const ORBITER: &str = "moon";
+/// Distance of the moon from the cube's centre, in metres.
+const ORBIT_RADIUS: f32 = 1.6;
+/// Height of the orbit plane: the cube's centre.
+const ORBIT_HEIGHT: f32 = 0.5;
+/// Angular speed of the orbit, in radians per second.
+const ORBIT_SPEED: f32 = 1.0;
+
+/// Where the moon is `t` seconds into the simulation: on a circle around
+/// the cube, starting at `(ORBIT_RADIUS, ORBIT_HEIGHT, 0)` and turning
+/// counter-clockwise seen from above.
+fn orbit_position(t: f32) -> Vec3 {
+    let angle = t * ORBIT_SPEED;
+    Vec3::new(
+        ORBIT_RADIUS * angle.cos(),
+        ORBIT_HEIGHT,
+        -ORBIT_RADIUS * angle.sin(),
+    )
 }
 
-/// Builds the scene: the renderer with a directional light, a ground slab,
-/// and a cube resting on it.
-fn setup(
-    world: &mut World,
-    res: &mut Resources,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    format: wgpu::TextureFormat,
-    cube: &MeshData,
-) {
-    let mut state = RenderState::new(device, queue, format);
-    state.light = LightUniform {
-        direction: [-0.6, -1.0, -0.4, 0.0],
-        color: [1.0, 0.95, 0.85, 1.0],
-        ambient: [0.12, 0.13, 0.16, 1.0],
-    };
-    let cube = state.registry.add(device, cube);
-    res.insert(state);
-
-    // Ground: the cube flattened into a slab whose top face is y = 0.
-    world.spawn((
-        Transform::from_trs(
-            Vec3::new(0.0, -0.25, 0.0),
-            Quat::IDENTITY,
-            Vec3::new(20.0, 0.5, 20.0),
-        ),
-        MeshInstance {
-            mesh: cube,
-            color: [0.18, 0.2, 0.17, 1.0],
-            texture: None,
-        },
-    ));
-
-    // The cube, turned a little so the light catches three faces.
-    world.spawn((
-        Transform::from_trs(
-            Vec3::new(0.0, 0.5, 0.0),
-            Quat::from_rotation_y(30f32.to_radians()),
-            Vec3::ONE,
-        ),
-        MeshInstance {
-            mesh: cube,
-            color: [0.8, 0.25, 0.1, 1.0],
-            texture: None,
-        },
-    ));
+/// Fixed system: puts every entity named [`ORBITER`] on its orbit for the
+/// current simulation time. Scene entities have no game-specific
+/// components, so the system finds them by [`Name`]; reloading the scene
+/// keeps it working.
+fn orbit_system(world: &mut World, res: &mut Resources) {
+    let t = res.expect::<Time>().elapsed as f32;
+    for (name, transform) in world.query_mut::<(&Name, &mut Transform)>() {
+        if name.0 == ORBITER {
+            transform.translation = orbit_position(t);
+        }
+    }
 }
 
-fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
-    let project = Project::load(Path::new(ROOT))?;
-    let cube = load_cube()?;
-
+/// The game's own systems. Add yours here; they run in the window and
+/// under `--mcp` alike.
+fn game_schedule() -> Schedule {
     let mut schedule = Schedule::new();
-    schedule.add_frame("fly_camera", fly_camera_system);
-    let mut game = EcsGame::new(World::new(), schedule);
-    game.title = project.window.title.clone();
+    schedule.add_fixed("orbit", orbit_system);
+    schedule
+}
 
-    // Start above and in front of the cube, looking down at it.
-    let fly = FlyCamera {
-        pitch: -20f32.to_radians(),
-        ..Default::default()
-    };
-    game.resources.insert(Camera {
-        transform: Transform::from_trs(Vec3::new(0.0, 2.0, 5.0), fly.rotation(), Vec3::ONE),
+/// Resources both modes start with: the camera's lens. The entry scene
+/// sets where the camera is and what it looks at.
+fn add_game_resources(res: &mut Resources) {
+    res.insert(Camera {
+        transform: Transform::default(),
         projection: Projection::Perspective {
             fov_y_radians: 60f32.to_radians(),
             near: 0.1,
             far: 200.0,
         },
     });
-    game.resources.insert(fly);
+}
 
-    game.render_fn = Some(Box::new(move |world, res, ctx, color, depth| {
+/// `game.hello` takes no arguments.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct HelloArgs {}
+
+/// Registers the game's own tools, next to the engine's. Add yours here:
+/// a name `<subsystem>.<verb>`, a description for agents, an args struct
+/// (its doc comments become the JSON schema), and a function of the
+/// engine.
+fn register_game_tools(registry: &mut ToolRegistry, project_name: String) {
+    registry.register(TypedTool::new(
+        "game.hello",
+        "Returns the name of this game. An example of a project-defined tool.",
+        move |_: &mut Headless, _: HelloArgs| Ok(ToolOutput::Text(project_name.clone())),
+    ));
+}
+
+/// The entry scene's path, if `shin.toml` names one.
+fn entry_scene(project: &Project) -> Option<PathBuf> {
+    project
+        .entry_scene
+        .as_ref()
+        .map(|scene| Path::new(ROOT).join(scene))
+}
+
+/// Serves the game over MCP on stdio: the engine's tools plus
+/// [`register_game_tools`], on a headless engine running [`game_schedule`]
+/// with the project (and its entry scene) open.
+fn serve_mcp(project: Project) -> anyhow::Result<()> {
+    let mut registry = ToolRegistry::with_engine_tools();
+    register_game_tools(&mut registry, project.name.clone());
+    let size = (project.window.width, project.window.height);
+    shin_mcp::serve_stdio(registry, move || {
+        let mut resources = Resources::new();
+        add_game_resources(&mut resources);
+        let mut engine = Headless::from_parts(World::new(), resources, game_schedule(), size)?;
+        engine.load_project(Path::new(ROOT))?;
+        Ok(engine)
+    })
+}
+
+/// First-frame setup in the window: the renderer for the window's colour
+/// format, the project's assets, the entry scene, and a fly camera facing
+/// the way the scene's camera does.
+fn load_scene(
+    world: &mut World,
+    res: &mut Resources,
+    gpu: &GpuContext,
+    format: wgpu::TextureFormat,
+    scene: Option<&Path>,
+) -> anyhow::Result<()> {
+    res.insert(RenderState::new(&gpu.device, &gpu.queue, format));
+    res.insert(Assets::new(PathBuf::from(ROOT)));
+    if let Some(path) = scene {
+        scene::load(world, res, &gpu.device, &gpu.queue, path)?;
+    }
+    let forward = res.expect::<Camera>().transform.forward();
+    let fly = res.expect_mut::<FlyCamera>();
+    fly.pitch = forward.y.asin();
+    fly.yaw = forward.x.atan2(-forward.z);
+    Ok(())
+}
+
+/// Plays the game in a window.
+fn run_window(project: Project) -> anyhow::Result<()> {
+    let mut schedule = game_schedule();
+    schedule.add_frame("fly_camera", fly_camera_system);
+    let mut game = EcsGame::new(World::new(), schedule);
+    game.title = project.window.title.clone();
+    add_game_resources(&mut game.resources);
+    game.resources.insert(FlyCamera::default());
+
+    let scene = entry_scene(&project);
+    game.render_fn = Some(Box::new(move |world, res, gpu, color, depth| {
         let texture = color.texture();
         if res.get::<RenderState>().is_none() {
-            setup(world, res, &ctx.device, &ctx.queue, texture.format(), &cube);
+            if let Err(err) = load_scene(world, res, gpu, texture.format(), scene.as_deref()) {
+                log::error!("{err:#}");
+                res.insert(ExitRequest(true));
+                return;
+            }
         }
         let aspect = texture.width() as f32 / texture.height() as f32;
-        render_world(world, res, ctx, color, depth, aspect);
+        render_world(world, res, gpu, color, depth, aspect);
     }));
 
     let config = AppConfig {
@@ -123,4 +188,17 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     app::run(config, game)
+}
+
+fn main() -> anyhow::Result<()> {
+    // Logs go to stderr, which keeps stdout free for MCP under `--mcp`.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let project = Project::load(Path::new(ROOT))?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => run_window(project),
+        [flag] if flag == "--mcp" => serve_mcp(project),
+        _ => anyhow::bail!("usage: cargo run [-- --mcp]"),
+    }
 }

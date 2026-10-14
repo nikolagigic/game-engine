@@ -65,14 +65,14 @@ fn serves_a_generated_project() -> anyhow::Result<()> {
     // The entry scene is already loaded; loading it again by its relative
     // path resolves against the project root.
     let entities = server.call_json("entity.list", json!({}));
-    assert_eq!(entities.as_array().map(Vec::len), Some(2), "{entities}");
+    assert_eq!(entities.as_array().map(Vec::len), Some(3), "{entities}");
     let loaded = server.call_json("scene.load", json!({ "path": project::STARTER_SCENE }));
-    assert_eq!(loaded["entities"], 2, "{loaded}");
+    assert_eq!(loaded["entities"], 3, "{loaded}");
     let entities = server.call_json("entity.list", json!({}));
     let entities = entities.as_array().expect("entity.list returns an array");
     assert!(!entities.is_empty());
     let names: Vec<&str> = entities.iter().filter_map(|e| e["name"].as_str()).collect();
-    assert_eq!(names, ["ground", "cube"]);
+    assert_eq!(names, ["ground", "cube", "moon"]);
 
     // The frame defaults to the project's window size and decodes as PNG.
     let frame = server.call("render.frame", json!({}));
@@ -85,7 +85,7 @@ fn serves_a_generated_project() -> anyhow::Result<()> {
 
     // Saving with a relative path writes under the project directory.
     let saved = server.call_json("scene.save", json!({ "path": "scenes/out.scene.ron" }));
-    assert_eq!(saved["entities"], 2, "{saved}");
+    assert_eq!(saved["entities"], 3, "{saved}");
     let out = dir.join("scenes/out.scene.ron");
     assert!(out.is_file(), "{} was not written", out.display());
 
