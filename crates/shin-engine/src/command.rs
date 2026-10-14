@@ -12,6 +12,12 @@
 //! [`undo`], and [`redo`] use that resource, and so do the
 //! `history.undo` and `history.redo` tools ([`register_tools`]).
 //!
+//! The history is frozen while the engine is playing (GE-011): recorded
+//! calls, [`History::undo`], and [`History::redo`] fail with
+//! [`FROZEN_WHILE_PLAYING`], because play mode restores the scene on stop
+//! and an edit made mid-play would be lost or would undo the wrong state.
+//! Unrecorded calls ([`Affected::None`], such as `sim.stop`) still run.
+//!
 //! Only tool calls made through [`History::apply`] (or [`apply`]) are
 //! recorded; a plain [`ToolRegistry::call`] is not. Tools whose
 //! [`Affected`] is [`Affected::None`] (queries, renders, asset loads,
@@ -19,7 +25,7 @@
 //! alone.
 //!
 //! A snapshot holds, per entity, the components the editing tools change:
-//! [`Transform`], [`MeshInstance`], and [`Name`]. Restoring one keeps every
+//! [`Transform`], [`MeshInstance`], [`Name`], and [`Script`]. Restoring one keeps every
 //! entity's [`Entity`] id (via `World::spawn_at`), so ids handed out by
 //! `entity.spawn` stay valid across undo and redo. Other components on a
 //! restored entity are kept if it is alive and lost if it is respawned.
@@ -55,7 +61,22 @@ use crate::ecs::{Entity, Name, World};
 use crate::headless::Headless;
 use crate::math::{Camera, Transform};
 use crate::render::{LightUniform, MeshInstance, RenderState};
+use crate::script::Script;
 use crate::tool::{ToolError, ToolOutput, ToolRegistry};
+
+/// The error recorded edits, undo, and redo fail with while the engine is
+/// playing.
+pub const FROZEN_WHILE_PLAYING: &str = "history is frozen while playing";
+
+/// Fails with [`FROZEN_WHILE_PLAYING`] if `engine` is playing (paused or
+/// not).
+fn ensure_not_playing(engine: &Headless) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !engine.play_state().is_playing(),
+        "{FROZEN_WHILE_PLAYING}; call sim.stop first"
+    );
+    Ok(())
+}
 
 /// The number of entries a [`History`] keeps by default.
 pub const DEFAULT_LIMIT: usize = 100;
@@ -88,6 +109,7 @@ struct EntityState {
     transform: Option<Transform>,
     instance: Option<MeshInstance>,
     name: Option<Name>,
+    script: Option<Script>,
 }
 
 impl EntityState {
@@ -97,6 +119,7 @@ impl EntityState {
             transform: world.get::<&Transform>(entity).ok().map(|t| *t),
             instance: world.get::<&MeshInstance>(entity).ok().map(|i| *i),
             name: world.get::<&Name>(entity).ok().map(|n| (*n).clone()),
+            script: world.get::<&Script>(entity).ok().map(|s| (*s).clone()),
         }
     }
 }
@@ -120,7 +143,7 @@ struct EntitiesSnapshot {
 
 /// The state a tool call touched, captured before or after it: the
 /// affected entities (keyed by [`Entity`] id, each with its
-/// [`Transform`], [`MeshInstance`], and [`Name`]), plus the camera or the
+/// [`Transform`], [`MeshInstance`], [`Name`], and [`Script`]), plus the camera or the
 /// light when the tool changes them.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -202,6 +225,7 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
         let _ = world.remove_one::<Transform>(entity);
         let _ = world.remove_one::<MeshInstance>(entity);
         let _ = world.remove_one::<Name>(entity);
+        let _ = world.remove_one::<Script>(entity);
     } else {
         world.spawn_at(entity, ());
     }
@@ -213,6 +237,9 @@ fn restore_entity(world: &mut World, entity: Entity, state: &EntityState) -> any
     }
     if let Some(name) = &state.name {
         world.insert_one(entity, name.clone())?;
+    }
+    if let Some(script) = &state.script {
+        world.insert_one(entity, script.clone())?;
     }
     Ok(())
 }
@@ -257,7 +284,8 @@ impl History {
     ///
     /// Successful calls whose [`Affected`] is not [`Affected::None`] are
     /// pushed onto the undo stack and clear the redo stack. Failed calls
-    /// and [`Affected::None`] calls are not recorded.
+    /// and [`Affected::None`] calls are not recorded. A call that would be
+    /// recorded fails without running while the engine is playing.
     pub fn apply(
         &mut self,
         reg: &ToolRegistry,
@@ -266,6 +294,9 @@ impl History {
         args: Value,
     ) -> Result<ToolOutput, ToolError> {
         let affected = reg.affected(engine, tool, &args)?;
+        if affected != Affected::None {
+            ensure_not_playing(engine)?;
+        }
         let (entities, camera, light) = match &affected {
             Affected::None => return reg.call(engine, tool, args),
             Affected::Entities(ids) => (Some(Scope::Only(ids.clone())), false, false),
@@ -312,8 +343,10 @@ impl History {
     }
 
     /// Restores the state before the most recent entry and moves it to the
-    /// redo stack. Returns `false` if there was nothing to undo.
+    /// redo stack. Returns `false` if there was nothing to undo. Fails
+    /// while the engine is playing.
     pub fn undo(&mut self, engine: &mut Headless) -> anyhow::Result<bool> {
+        ensure_not_playing(engine)?;
         let Some(entry) = self.undo.pop() else {
             return Ok(false);
         };
@@ -327,7 +360,9 @@ impl History {
 
     /// Restores the state after the most recently undone entry and moves it
     /// back to the undo stack. Returns `false` if there was nothing to redo.
+    /// Fails while the engine is playing.
     pub fn redo(&mut self, engine: &mut Headless) -> anyhow::Result<bool> {
+        ensure_not_playing(engine)?;
         let Some(entry) = self.redo.pop() else {
             return Ok(false);
         };
