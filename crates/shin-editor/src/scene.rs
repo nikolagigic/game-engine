@@ -33,7 +33,7 @@ pub fn build(
     gpu: &GpuContext,
     project_dir: &Path,
 ) -> anyhow::Result<()> {
-    let mut state = RenderState::new(&gpu.device, OFFSCREEN_COLOR_FORMAT);
+    let mut state = RenderState::new(&gpu.device, &gpu.queue, OFFSCREEN_COLOR_FORMAT);
     state.light = LightUniform {
         direction: [-0.6, -1.0, -0.4, 0.0],
         color: [1.0, 0.95, 0.85, 1.0],
@@ -72,6 +72,7 @@ pub fn build(
         MeshInstance {
             mesh: cube,
             color: [0.18, 0.2, 0.17, 1.0],
+            texture: None,
         },
     ));
     // The cube, turned a little so the light catches three faces.
@@ -84,6 +85,7 @@ pub fn build(
         MeshInstance {
             mesh: cube,
             color: [0.8, 0.25, 0.1, 1.0],
+            texture: None,
         },
     ));
     Ok(())

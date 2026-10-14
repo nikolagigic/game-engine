@@ -12,16 +12,18 @@
 //!             transform: (translation: (0.0, 1.0, 0.0)),
 //!             mesh: "builtin://cube",
 //!             color: (0.8, 0.1, 0.1, 1.0),
+//!             texture: "assets/checker.png",
 //!         ),
 //!     ],
 //! )
 //! ```
 //!
 //! [`save`] writes and [`load`] reads that format. Optional fields
-//! (`camera`, `light`, `name`, `mesh`, `color`, and every transform part)
-//! may be left out, and are written without `Some(...)`. Unknown fields are
-//! an error naming the field. Meshes are [`AssetSource`] strings, so a scene
-//! file is independent of runtime mesh handles.
+//! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, and every
+//! transform part) may be left out, and are written without `Some(...)`.
+//! Unknown fields are an error naming the field. Meshes and textures
+//! (GE-025) are [`AssetSource`] strings, so a scene file is independent of
+//! runtime mesh and texture handles.
 //!
 //! Angles (`rotation_euler_deg`, `fov_y_deg`) and `look_at` are derived from
 //! the engine's quaternions and radians, so [`save`] rounds them to four
@@ -42,7 +44,7 @@ pub use tools::register_tools;
 use crate::asset::{AssetSource, Assets};
 use crate::ecs::{Entity, Name, Resources, World};
 use crate::math::{Camera, Projection, Quat, Transform, Vec3};
-use crate::render::{LightUniform, MeshInstance, RenderState};
+use crate::render::{LightUniform, MeshHandle, MeshInstance, RenderState, TextureHandle};
 
 /// The scene format version [`save`] writes and [`load`] accepts.
 pub const VERSION: u32 = 1;
@@ -122,6 +124,11 @@ pub struct EntityDesc {
     /// Linear RGBA tint of the mesh; default white. Ignored without `mesh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 4]>,
+    /// Base-colour texture, as a texture [`AssetSource`] string such as
+    /// `assets/x.png` or `assets/x.gltf#image=0`; none for untextured.
+    /// Ignored without `mesh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
 }
 
 /// A [`Transform`] in editable units.
@@ -186,7 +193,7 @@ impl SceneFile {
             .iter()
         {
             let id = entity.to_bits().get();
-            let (mesh, color) = match instance {
+            let (mesh, color, texture) = match instance {
                 Some(instance) => {
                     let source = state
                         .and_then(|s| s.registry.source(instance.mesh))
@@ -198,15 +205,32 @@ impl SceneFile {
                                 instance.mesh.0
                             )
                         })?;
-                    (Some(source.to_string()), Some(instance.color))
+                    let texture = instance
+                        .texture
+                        .map(|handle| {
+                            state
+                                .and_then(|s| s.textures.source(handle))
+                                .map(|s| s.to_string())
+                                .with_context(|| {
+                                    format!(
+                                        "entity {id} uses texture handle {} which has no asset \
+                                         source, so it cannot be saved; load textures with \
+                                         asset.load",
+                                        handle.0
+                                    )
+                                })
+                        })
+                        .transpose()?;
+                    (Some(source.to_string()), Some(instance.color), texture)
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
             let desc = EntityDesc {
                 name: name.map(|Name(n)| n.clone()),
                 transform: TransformDesc::from_transform(transform),
                 mesh,
                 color,
+                texture,
             };
             rows.push((id, desc));
         }
@@ -268,24 +292,26 @@ pub fn save(world: &World, res: &Resources, path: &Path) -> anyhow::Result<()> {
 /// Replaces `world`'s entities with the scene in `path` and applies its
 /// camera and light. Returns the number of entities spawned.
 ///
-/// Meshes are resolved through the [`Assets`] resource (relative file
-/// sources against its root) and uploaded into the [`RenderState`]
-/// registry. Everything is parsed, validated, and resolved before the world
-/// is cleared, so a failed load leaves the world untouched. Fails on a
-/// parse error, an unknown field (named), an unsupported version, an
-/// invalid camera or light, or a mesh source that does not resolve (the
+/// Meshes and textures are resolved through the [`Assets`] resource
+/// (relative file sources against its root) and uploaded into the
+/// [`RenderState`] registries (`queue` uploads texture pixels).
+/// Everything is parsed, validated, and resolved before the world is
+/// cleared, so a failed load leaves the world untouched. Fails on a parse
+/// error, an unknown field (named), an unsupported version, an invalid
+/// camera or light, or a mesh or texture source that does not resolve (the
 /// error names the source).
 pub fn load(
     world: &mut World,
     res: &mut Resources,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     path: &Path,
 ) -> anyhow::Result<usize> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let scene =
         SceneFile::from_ron(&text).with_context(|| format!("invalid scene {}", path.display()))?;
-    apply(world, res, device, &scene)
+    apply(world, res, device, queue, &scene)
 }
 
 /// [`load`] for an already parsed scene.
@@ -293,6 +319,7 @@ fn apply(
     world: &mut World,
     res: &mut Resources,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     scene: &SceneFile,
 ) -> anyhow::Result<usize> {
     if let Some(camera) = &scene.camera {
@@ -304,14 +331,19 @@ fn apply(
             "light direction must not be zero"
         );
     }
-    let meshes = resolve_meshes(res, device, &scene.entities)?;
+    let resolved = resolve_assets(res, device, queue, &scene.entities)?;
 
     world.clear();
-    for (desc, mesh) in scene.entities.iter().zip(meshes) {
+    for (desc, assets) in scene.entities.iter().zip(resolved) {
         let entity = world.spawn((desc.transform.to_transform(),));
-        if let Some(mesh) = mesh {
+        if let Some((mesh, texture)) = assets {
             let color = desc.color.unwrap_or([1.0; 4]);
-            world.insert_one(entity, MeshInstance { mesh, color })?;
+            let instance = MeshInstance {
+                mesh,
+                color,
+                texture,
+            };
+            world.insert_one(entity, instance)?;
         }
         if let Some(name) = &desc.name {
             world.insert_one(entity, Name(name.clone()))?;
@@ -334,12 +366,17 @@ fn apply(
     Ok(scene.entities.len())
 }
 
-/// The mesh handle of every entity, in order, uploading sources as needed.
-fn resolve_meshes(
+/// What an entity draws: its mesh and optional texture.
+type DrawAssets = (MeshHandle, Option<TextureHandle>);
+
+/// The mesh and texture handles of every entity that draws a mesh, in
+/// order, uploading sources as needed. A texture without a mesh is ignored.
+fn resolve_assets(
     res: &mut Resources,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     entities: &[EntityDesc],
-) -> anyhow::Result<Vec<Option<crate::render::MeshHandle>>> {
+) -> anyhow::Result<Vec<Option<DrawAssets>>> {
     // Resources lend one value mutably at a time, so `Assets` is moved out
     // for the duration and always put back.
     let slot = res.get_mut::<Assets>().context("no Assets resource")?;
@@ -358,7 +395,20 @@ fn resolve_meshes(
                 let mesh = AssetSource::parse(text)
                     .and_then(|source| assets.mesh(device, &mut state.registry, &source))
                     .with_context(|| format!("entity {i}: mesh {text:?} could not be loaded"))?;
-                Ok(Some(mesh))
+                let texture = desc
+                    .texture
+                    .as_ref()
+                    .map(|text| {
+                        AssetSource::parse(text)
+                            .and_then(|source| {
+                                assets.texture(device, queue, &mut state.textures, &source)
+                            })
+                            .with_context(|| {
+                                format!("entity {i}: texture {text:?} could not be loaded")
+                            })
+                    })
+                    .transpose()?;
+                Ok(Some((mesh, texture)))
             })
             .collect()
     })();
@@ -490,11 +540,25 @@ mod tests {
             json!({ "source": "builtin://sphere-8x4" }),
         )["handle"]
             .clone();
+        // Textures (GE-025): one image file and one glTF image.
+        let test_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/test");
+        let png_source = test_assets.join("checker.png").display().to_string();
+        let gltf_source = format!(
+            "{}#image=0",
+            test_assets.join("textured_cube.gltf").display()
+        );
+        let load_texture = |engine: &mut Headless, source: &str| {
+            call_json(&reg, engine, "asset.load", json!({ "source": source }))["texture"].clone()
+        };
+        let png = load_texture(&mut engine, &png_source);
+        let embedded = load_texture(&mut engine, &gltf_source);
         for args in [
             json!({ "mesh": cube, "name": "tilted", "translation": [-1.5, 0.25, 0],
                     "rotation_euler_deg": [10, 30, -45], "color": [0.8, 0.1, 0.1, 1] }),
             json!({ "mesh": sphere, "translation": [0.1, 0.2, 0.3] }),
             json!({ "mesh": cube, "name": "small", "scale": [0.6, 0.6, 0.6] }),
+            json!({ "mesh": cube, "name": "checkered", "texture": png }),
+            json!({ "mesh": sphere, "texture": embedded, "color": [0.5, 0.5, 1, 1] }),
         ] {
             call_json(&reg, &mut engine, "entity.spawn", args);
         }
@@ -513,11 +577,11 @@ mod tests {
 
         let first = dir.join("first.scene.ron");
         let out = call_json(&reg, &mut engine, "scene.save", json!({ "path": first }));
-        assert_eq!(out["entities"], 3);
+        assert_eq!(out["entities"], 5);
         call_json(&reg, &mut engine, "scene.clear", json!({}));
         assert_eq!(engine.world.len(), 0);
         let out = call_json(&reg, &mut engine, "scene.load", json!({ "path": first }));
-        assert_eq!(out, json!({ "entities": 3 }));
+        assert_eq!(out, json!({ "entities": 5 }));
         let second = dir.join("second.scene.ron");
         call_json(&reg, &mut engine, "scene.save", json!({ "path": second }));
 
@@ -530,12 +594,26 @@ mod tests {
         assert!(a.contains("rotation_euler_deg: (10.0, 30.0, -45.0)"), "{a}");
         assert!(a.contains("fov_y_deg: 50.0"), "{a}");
         assert!(!a.contains("Some("), "{a}");
+        assert!(a.contains(&format!("texture: {png_source:?}")), "{a}");
+        assert!(a.contains(&format!("texture: {gltf_source:?}")), "{a}");
+        assert_eq!(
+            a.matches("texture:").count(),
+            2,
+            "untextured entities omit it"
+        );
 
-        // Loaded entities carry their names and are listed with them.
+        // Loaded entities carry their names and textures; the textures come
+        // from the Assets cache, so nothing is uploaded twice.
         let list = call_json(&reg, &mut engine, "entity.list", json!({}));
         assert_eq!(list[0]["name"], "tilted");
         assert!(list[1].get("name").is_none(), "{}", list[1]);
         assert_eq!(list[2]["name"], "small");
+        let textures: Vec<&Value> = (0..5).map(|i| &list[i]["texture"]).collect();
+        assert_eq!(
+            textures,
+            [&Value::Null, &Value::Null, &Value::Null, &png, &embedded]
+        );
+        assert_eq!(engine.resources.expect::<RenderState>().textures.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
@@ -611,6 +689,19 @@ mod tests {
             assert!(err.contains(source), "{err}");
             assert_eq!(engine.world.len(), 1, "a failed load leaves the world");
         }
+        // The same for textures, including a mesh source given as a texture.
+        for source in ["assets/nope/missing.png", "builtin://cube"] {
+            let path = dir.join("bad.scene.ron");
+            std::fs::write(
+                &path,
+                format!(
+                    "(version: 1, entities: [(mesh: \"builtin://cube\", texture: {source:?})])"
+                ),
+            )?;
+            let err = call_err(&reg, &mut engine, "scene.load", json!({ "path": path }));
+            assert!(err.contains(&format!("texture {source:?}")), "{err}");
+            assert_eq!(engine.world.len(), 1, "a failed load leaves the world");
+        }
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
@@ -642,6 +733,34 @@ mod tests {
         let path = dir.join("x.scene.ron");
         let err = call_err(&reg, &mut engine, "scene.save", json!({ "path": path }));
         assert!(err.contains("no asset source"), "{err}");
+        assert!(!path.exists());
+
+        // Likewise a texture added from code.
+        engine.world.clear();
+        let cube =
+            call_json(&reg, &mut engine, "mesh.builtin", json!({ "kind": "cube" }))["handle"]
+                .clone();
+        let state = engine.resources.expect_mut::<RenderState>();
+        let image = crate::asset::ImageData {
+            name: "white".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        };
+        let texture = state
+            .textures
+            .add(&engine.gpu.device, &engine.gpu.queue, &image);
+        call_json(
+            &reg,
+            &mut engine,
+            "entity.spawn",
+            json!({ "mesh": cube, "texture": texture.0 }),
+        );
+        let err = call_err(&reg, &mut engine, "scene.save", json!({ "path": path }));
+        assert!(
+            err.contains("texture handle 0 which has no asset source"),
+            "{err}"
+        );
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

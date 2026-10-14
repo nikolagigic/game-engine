@@ -31,6 +31,7 @@ fn demo_engine() -> anyhow::Result<Headless> {
         &mut engine.world,
         &mut engine.resources,
         &engine.gpu.device,
+        &engine.gpu.queue,
         OFFSCREEN_COLOR_FORMAT,
         &gltf_cube,
     );

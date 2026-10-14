@@ -1,6 +1,7 @@
-//! Stable asset names (GE-019): [`AssetSource`] says where a mesh comes
-//! from, and the [`Assets`] resource turns sources into GPU meshes, uploading
-//! each source once.
+//! Stable asset names (GE-019): [`AssetSource`] says where a mesh or a
+//! texture comes from, and the [`Assets`] resource turns sources into GPU
+//! meshes ([`Assets::mesh`]) and textures ([`Assets::texture`], GE-025),
+//! uploading each source once.
 //!
 //! Sources have a string form used by tools and scene files:
 //!
@@ -9,6 +10,10 @@
 //! | `builtin://cube`        | [`AssetSource::Builtin`]`("cube")`            |
 //! | `assets/x.gltf`         | [`AssetSource::File`] with `index: 0`         |
 //! | `assets/x.gltf#2`       | [`AssetSource::File`] with `index: 2`         |
+//! | `assets/x.png`          | [`AssetSource::Image`] (also `.jpg`, `.jpeg`) |
+//! | `assets/x.gltf#image=1` | [`AssetSource::GltfImage`] with `index: 1`    |
+//!
+//! The first three are meshes, the last two textures.
 //!
 //! Built-in names are `cube` ([`super::cube`]), `sphere`
 //! ([`super::uv_sphere`] with 32 segments and 16 rings), and
@@ -22,11 +27,17 @@ use std::str::FromStr;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-use super::MeshData;
-use crate::render::{MeshHandle, MeshRegistry};
+use super::{ImageData, MeshData};
+use crate::render::{MeshHandle, MeshRegistry, TextureHandle, TextureRegistry};
 
 /// Prefix of a built-in source's string form.
 const BUILTIN_SCHEME: &str = "builtin://";
+
+/// What follows `#` in a glTF image source: `x.gltf#image=<index>`.
+const GLTF_IMAGE_FRAGMENT: &str = "image=";
+
+/// File extensions (lowercase) that make a path an [`AssetSource::Image`].
+const IMAGE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
 
 /// Segments and rings of the plain `sphere` built-in.
 const DEFAULT_SPHERE: (u32, u32) = (32, 16);
@@ -34,8 +45,8 @@ const DEFAULT_SPHERE: (u32, u32) = (32, 16);
 /// Largest segment or ring count a built-in sphere may have.
 const MAX_SPHERE_DIVISIONS: u32 = 1024;
 
-/// Where a mesh comes from: a stable name that survives restarts, unlike a
-/// runtime [`MeshHandle`].
+/// Where a mesh or texture comes from: a stable name that survives
+/// restarts, unlike a runtime [`MeshHandle`] or [`TextureHandle`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetSource {
     /// A mesh generated in code, by name: `cube`, `sphere`, or
@@ -50,16 +61,33 @@ pub enum AssetSource {
         /// ([`super::SceneData::meshes`]); 0 for single-mesh files.
         index: usize,
     },
+    /// A texture: a PNG or JPEG file. The path must end in `.png`, `.jpg`,
+    /// or `.jpeg` (any case) for the string form to parse back to this.
+    Image {
+        /// Path to the image; relative paths are resolved against
+        /// [`Assets`]' root.
+        path: PathBuf,
+    },
+    /// A texture: an image of a glTF file, embedded or referenced.
+    GltfImage {
+        /// Path to a `.gltf` or `.glb` file; relative paths are resolved
+        /// against [`Assets`]' root.
+        path: PathBuf,
+        /// Index into the file's images ([`super::SceneData::images`]).
+        index: usize,
+    },
 }
 
 impl AssetSource {
-    /// Parses the string form: `builtin://<name>`, `<path>`, or
-    /// `<path>#<index>`.
+    /// Parses the string form: `builtin://<name>`, `<path>`,
+    /// `<path>#<index>`, an image path ending in `.png`, `.jpg`, or `.jpeg`,
+    /// or `<path>#image=<index>`.
     ///
     /// Only the syntax is checked; whether the built-in exists or the file
-    /// loads is checked by [`Assets::mesh`]. Fails on an empty string, an
-    /// empty or non-`[A-Za-z0-9_-]` built-in name, an empty path, an index
-    /// that is not a non-negative integer, or any other `scheme://`.
+    /// loads is checked by [`Assets::mesh`] and [`Assets::texture`]. Fails
+    /// on an empty string, an empty or non-`[A-Za-z0-9_-]` built-in name,
+    /// an empty path, an index that is not a non-negative integer, or any
+    /// other `scheme://`.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         if let Some(name) = s.strip_prefix(BUILTIN_SCHEME) {
             let valid = !name.is_empty()
@@ -77,6 +105,24 @@ impl AssetSource {
             !s.contains("://"),
             "invalid asset source {s:?}: only builtin:// and file paths are supported"
         );
+        if has_image_extension(Path::new(s)) {
+            return Ok(Self::Image {
+                path: PathBuf::from(s),
+            });
+        }
+        if let Some((path, index)) = s
+            .rsplit_once('#')
+            .and_then(|(path, fragment)| Some((path, fragment.strip_prefix(GLTF_IMAGE_FRAGMENT)?)))
+        {
+            let index = index.parse().with_context(|| {
+                format!("invalid asset source {s:?}: {index:?} after '#image=' is not an index")
+            })?;
+            anyhow::ensure!(!path.is_empty(), "invalid asset source {s:?}: empty path");
+            return Ok(Self::GltfImage {
+                path: PathBuf::from(path),
+                index,
+            });
+        }
         let (path, index) = match s.rsplit_once('#') {
             Some((path, index)) => {
                 let index = index.parse().with_context(|| {
@@ -92,6 +138,19 @@ impl AssetSource {
             index,
         })
     }
+
+    /// Whether this names a texture ([`Self::Image`] or
+    /// [`Self::GltfImage`]) rather than a mesh.
+    pub fn is_texture(&self) -> bool {
+        matches!(self, Self::Image { .. } | Self::GltfImage { .. })
+    }
+}
+
+/// Whether `path` ends in one of [`IMAGE_EXTENSIONS`], ignoring case.
+fn has_image_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 impl fmt::Display for AssetSource {
@@ -109,6 +168,10 @@ impl fmt::Display for AssetSource {
                     write!(f, "{path}#{index}")
                 }
             }
+            Self::Image { path } => write!(f, "{}", path.display()),
+            Self::GltfImage { path, index } => {
+                write!(f, "{}#{GLTF_IMAGE_FRAGMENT}{index}", path.display())
+            }
         }
     }
 }
@@ -121,13 +184,15 @@ impl FromStr for AssetSource {
     }
 }
 
-/// Resource: resolves [`AssetSource`]s to GPU meshes, caching by source so
-/// each source is loaded and uploaded once.
+/// Resource: resolves [`AssetSource`]s to GPU meshes and textures, caching
+/// by source so each source is loaded and uploaded once.
 pub struct Assets {
     /// Directory relative file sources are resolved against.
     root: PathBuf,
-    /// Every source uploaded so far.
+    /// Every mesh source uploaded so far.
     meshes: HashMap<AssetSource, MeshHandle>,
+    /// Every texture source uploaded so far.
+    textures: HashMap<AssetSource, TextureHandle>,
 }
 
 impl Assets {
@@ -137,6 +202,7 @@ impl Assets {
         Self {
             root,
             meshes: HashMap::new(),
+            textures: HashMap::new(),
         }
     }
 
@@ -149,8 +215,9 @@ impl Assets {
     /// `registry` on first use. Later calls with an equal source return the
     /// same handle without touching the disk or the GPU.
     ///
-    /// Fails if a built-in name is unknown, the file does not load, or the
-    /// file has no triangle primitive at `index`.
+    /// Fails if `source` is a texture source, a built-in name is unknown,
+    /// the file does not load, or the file has no triangle primitive at
+    /// `index`.
     pub fn mesh(
         &mut self,
         device: &wgpu::Device,
@@ -172,8 +239,101 @@ impl Assets {
                 );
                 scene.meshes.swap_remove(*index)
             }
+            AssetSource::Image { .. } | AssetSource::GltfImage { .. } => {
+                anyhow::bail!("{source} is a texture source, not a mesh")
+            }
         };
         Ok(self.insert(device, registry, source, &data))
+    }
+
+    /// The handle of `source`'s texture, loading and uploading it into
+    /// `textures` on first use. Later calls with an equal source return the
+    /// same handle without touching the disk or the GPU.
+    ///
+    /// Fails if `source` is a mesh source, the file does not load, or a
+    /// glTF file has no image at `index`.
+    pub fn texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureRegistry,
+        source: &AssetSource,
+    ) -> anyhow::Result<TextureHandle> {
+        if let Some(handle) = self.cached_texture(textures, source) {
+            return Ok(handle);
+        }
+        let image = match source {
+            AssetSource::Image { path } => super::load_image(self.resolve(path))?,
+            AssetSource::GltfImage { path, index } => {
+                let mut scene = super::load_gltf(self.resolve(path))?;
+                let count = scene.images.len();
+                anyhow::ensure!(
+                    *index < count,
+                    "{} has {count} image(s); image index {index} is out of range",
+                    path.display()
+                );
+                scene.images.swap_remove(*index)
+            }
+            AssetSource::Builtin(_) | AssetSource::File { .. } => {
+                anyhow::bail!("{source} is a mesh source, not a texture")
+            }
+        };
+        self.insert_texture(device, queue, textures, source, &image)
+    }
+
+    /// Like [`Self::texture`] for a source whose [`ImageData`] the caller
+    /// has already loaded: uploads `image` unless `source` is cached.
+    pub(crate) fn texture_from_data(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureRegistry,
+        source: &AssetSource,
+        image: &ImageData,
+    ) -> anyhow::Result<TextureHandle> {
+        match self.cached_texture(textures, source) {
+            Some(handle) => Ok(handle),
+            None => self.insert_texture(device, queue, textures, source, image),
+        }
+    }
+
+    /// The cached texture handle for `source`, if it is still in `textures`.
+    fn cached_texture(
+        &self,
+        textures: &TextureRegistry,
+        source: &AssetSource,
+    ) -> Option<TextureHandle> {
+        self.textures
+            .get(source)
+            .copied()
+            .filter(|&handle| textures.contains(handle))
+    }
+
+    /// Uploads `image` tagged with `source` and caches the handle. Fails,
+    /// instead of tripping wgpu validation, if the image is empty, larger
+    /// than the device allows, or its pixel buffer has the wrong length.
+    fn insert_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureRegistry,
+        source: &AssetSource,
+        image: &ImageData,
+    ) -> anyhow::Result<TextureHandle> {
+        let max = device.limits().max_texture_dimension_2d;
+        let (w, h) = (image.width, image.height);
+        anyhow::ensure!(
+            (1..=max).contains(&w) && (1..=max).contains(&h),
+            "{source}: image is {w}x{h}; textures must be 1..={max} pixels on each side"
+        );
+        anyhow::ensure!(
+            image.rgba.len() as u64 == u64::from(w) * u64::from(h) * 4,
+            "{source}: image has {} bytes of RGBA, expected {w}x{h}x4",
+            image.rgba.len()
+        );
+        let handle = textures.add_with_source(device, queue, image, source.clone());
+        self.textures.insert(source.clone(), handle);
+        Ok(handle)
     }
 
     /// The source `handle` was loaded from, if it came through
@@ -324,6 +484,104 @@ mod tests {
         );
         assert_eq!(file("assets/x.gltf", 2).to_string(), "assets/x.gltf#2");
         assert_eq!(file("odd#name.gltf", 0).to_string(), "odd#name.gltf#0");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_reads_texture_sources() -> anyhow::Result<()> {
+        let image = |path: &str| AssetSource::Image {
+            path: PathBuf::from(path),
+        };
+        let gltf_image = |path: &str, index| AssetSource::GltfImage {
+            path: PathBuf::from(path),
+            index,
+        };
+        assert_eq!(AssetSource::parse("assets/c.png")?, image("assets/c.png"));
+        assert_eq!(AssetSource::parse("c.JPG")?, image("c.JPG"));
+        assert_eq!(AssetSource::parse("odd#name.jpeg")?, image("odd#name.jpeg"));
+        assert_eq!(
+            AssetSource::parse("assets/x.gltf#image=3")?,
+            gltf_image("assets/x.gltf", 3)
+        );
+        assert_eq!(
+            AssetSource::parse("a#b.glb#image=0")?,
+            gltf_image("a#b.glb", 0)
+        );
+        // Not an image extension: still a mesh.
+        assert_eq!(AssetSource::parse("x.png#1")?, file("x.png", 1));
+        for s in [
+            "assets/c.png",
+            "odd#name.jpeg",
+            "assets/x.gltf#image=3",
+            "a#b.glb#image=0",
+        ] {
+            let source = AssetSource::parse(s)?;
+            assert!(source.is_texture(), "{s}");
+            assert_eq!(source.to_string(), s);
+        }
+        assert!(!AssetSource::parse("builtin://cube")?.is_texture());
+        assert!(!AssetSource::parse("x.gltf#1")?.is_texture());
+        for bad in ["x.gltf#image=", "x.gltf#image=-1", "#image=0"] {
+            assert!(AssetSource::parse(bad).is_err(), "{bad:?} should not parse");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn textures_are_cached_by_source_and_kinds_do_not_mix() -> anyhow::Result<()> {
+        let gpu = GpuContext::new(None)?;
+        let mut state = crate::render::RenderState::new(
+            &gpu.device,
+            &gpu.queue,
+            crate::gpu::OFFSCREEN_COLOR_FORMAT,
+        );
+        let mut assets = Assets::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let png = AssetSource::parse("assets/test/checker.png")?;
+        let embedded = AssetSource::parse("assets/test/textured_cube.gltf#image=0")?;
+        let (device, queue) = (&gpu.device, &gpu.queue);
+
+        let first = assets.texture(device, queue, &mut state.textures, &png)?;
+        assert_eq!(
+            assets.texture(device, queue, &mut state.textures, &png)?,
+            first
+        );
+        let second = assets.texture(device, queue, &mut state.textures, &embedded)?;
+        assert_ne!(first, second);
+        assert_eq!(state.textures.len(), 2);
+        assert_eq!(state.textures.get(second).size(), (64, 64));
+        assert_eq!(state.textures.source(second), Some(&embedded));
+
+        let missing = AssetSource::parse("assets/test/textured_cube.gltf#image=4")?;
+        let err = assets
+            .texture(device, queue, &mut state.textures, &missing)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("out of range"), "{err:#}");
+
+        // A mesh source is not a texture, and a texture source not a mesh.
+        let cube = AssetSource::parse("builtin://cube")?;
+        let err = assets
+            .texture(device, queue, &mut state.textures, &cube)
+            .unwrap_err();
+        assert!(err.to_string().contains("not a texture"), "{err}");
+        let err = assets.mesh(device, &mut state.registry, &png).unwrap_err();
+        assert!(err.to_string().contains("not a mesh"), "{err}");
+        assert!(state.registry.is_empty());
+
+        // Images wgpu would reject fail with an error instead of a panic.
+        let max = gpu.device.limits().max_texture_dimension_2d;
+        for (width, height, bytes) in [(0, 4, 0), (max + 1, 1, 4 * (max as usize + 1)), (2, 2, 4)] {
+            let image = ImageData {
+                name: "bad".into(),
+                width,
+                height,
+                rgba: vec![0; bytes],
+            };
+            let source = AssetSource::parse("bad.png")?;
+            let result =
+                assets.texture_from_data(device, queue, &mut state.textures, &source, &image);
+            assert!(result.is_err(), "{width}x{height} with {bytes} bytes");
+        }
+        assert_eq!(state.textures.len(), 2);
         Ok(())
     }
 

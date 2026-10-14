@@ -165,7 +165,7 @@ pub fn render_lit_mesh(
 
     let ctx = GpuContext::new(None)?;
     let target = OffscreenTarget::new(&ctx.device, size, size);
-    let mut renderer = MeshRenderer::new(&ctx.device, OFFSCREEN_COLOR_FORMAT);
+    let mut renderer = MeshRenderer::new(&ctx.device, &ctx.queue, OFFSCREEN_COLOR_FORMAT);
 
     let mut camera = Camera {
         transform: Transform::from_translation(Vec3::new(0.0, 2.0, 5.0)),

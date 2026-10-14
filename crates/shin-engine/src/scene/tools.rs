@@ -68,6 +68,7 @@ fn scene_load(engine: &mut Headless, args: LoadArgs) -> anyhow::Result<ToolOutpu
         &mut engine.world,
         &mut engine.resources,
         &engine.gpu.device,
+        &engine.gpu.queue,
         &path,
     )?;
     Ok(ToolOutput::Json(json!({ "entities": entities })))

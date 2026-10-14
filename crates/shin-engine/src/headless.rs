@@ -65,7 +65,7 @@ impl Headless {
         resources.insert(FrameStats::default());
         let mut schedule = Schedule::new();
         schedule.add_frame("frame_stats", frame_stats_system);
-        let mut render_state = RenderState::new(&gpu.device, OFFSCREEN_COLOR_FORMAT);
+        let mut render_state = RenderState::new(&gpu.device, &gpu.queue, OFFSCREEN_COLOR_FORMAT);
         render_state.light = default_light();
         resources.insert(render_state);
         resources.insert(default_camera());

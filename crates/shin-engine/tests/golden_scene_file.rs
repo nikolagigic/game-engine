@@ -17,6 +17,7 @@ fn tool_scene_from_file_matches_golden() -> anyhow::Result<()> {
         &mut engine.world,
         &mut engine.resources,
         &engine.gpu.device,
+        &engine.gpu.queue,
         &path,
     )?;
     assert_eq!(spawned, 3);

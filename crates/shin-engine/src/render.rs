@@ -17,19 +17,28 @@
 //!
 //! ECS integration (GE-008): entities with a [`Transform`] and a
 //! [`MeshInstance`] component are drawn by [`render_world`], which groups
-//! them by [`MeshHandle`] into one instanced draw call per mesh. Meshes live
-//! in the [`MeshRegistry`] inside the [`RenderState`] resource.
+//! them by [`MeshHandle`] and [`TextureHandle`] into one instanced draw call
+//! per (mesh, texture) pair. Meshes live in the [`MeshRegistry`] and
+//! textures in the [`TextureRegistry`] inside the [`RenderState`] resource.
+//!
+//! Textures (GE-025): the shader multiplies a base-colour texture
+//! (`@group(1)`: texture at binding 0, the renderer's one sampler at
+//! binding 1), sampled at the vertex `uv`, into the material and instance
+//! colours. Untextured draws bind a 1×1 white texture, so one pipeline
+//! serves both and untextured output is unchanged. Textures are
+//! [`TEXTURE_FORMAT`] (sRGB), so samples come back linear.
 //!
 //! Tools (GE-015): [`register_tools`] adds `mesh.list`, `camera.set`,
 //! `light.set`, and `render.frame`.
 
 mod tools;
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use wgpu::util::DeviceExt as _;
 
-use crate::asset::{AssetSource, MeshData, Vertex};
+use crate::asset::{AssetSource, ImageData, MeshData, Vertex};
 use crate::ecs::{Resources, World};
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::math::{Camera, Mat3, Transform};
@@ -71,6 +80,138 @@ impl GpuMesh {
             vertex_count: mesh.vertices.len() as u32,
             name: mesh.name.clone(),
         }
+    }
+}
+
+/// Format of every base-colour texture. glTF base colour is sRGB-encoded,
+/// so the GPU decodes samples to linear, matching the shader's colour space.
+pub const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// The `@group(1)` bind group layout and the one sampler every texture
+/// bind group shares. Cheap to clone (wgpu handles are reference counted).
+#[derive(Clone)]
+struct TextureBinder {
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl TextureBinder {
+    /// The layout (texture at binding 0, filtering sampler at binding 1)
+    /// and a linear, repeating sampler without mipmaps.
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("base colour sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self { layout, sampler }
+    }
+
+    /// Uploads `image` as a [`TEXTURE_FORMAT`] texture and binds it with
+    /// the shared sampler.
+    fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, image: &ImageData) -> GpuTexture {
+        let label = format!("texture '{}'", image.name);
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some(&label),
+                size: wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TEXTURE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &image.rgba,
+        );
+        let view = texture.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&label),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        GpuTexture {
+            texture,
+            view,
+            bind_group,
+            name: image.name.clone(),
+        }
+    }
+}
+
+/// A base-colour texture living on the GPU, bound and ready for
+/// [`MeshRenderer::draw_textured`].
+pub struct GpuTexture {
+    /// The [`TEXTURE_FORMAT`] texture, one mip level.
+    pub texture: wgpu::Texture,
+    /// A view of the whole texture.
+    pub view: wgpu::TextureView,
+    /// `@group(1)`: [`Self::view`] plus the renderer's sampler.
+    bind_group: wgpu::BindGroup,
+    /// Name of the [`ImageData`] this was uploaded from (may be empty).
+    pub name: String,
+}
+
+impl GpuTexture {
+    /// Uploads `image` (RGBA8, treated as sRGB) for drawing with
+    /// `renderer`.
+    ///
+    /// # Panics
+    ///
+    /// If `image.rgba` is not `width * height * 4` bytes, or a dimension is
+    /// zero or exceeds the device's limits (wgpu validation).
+    pub fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &MeshRenderer,
+        image: &ImageData,
+    ) -> Self {
+        renderer.binder.upload(device, queue, image)
+    }
+
+    /// Width and height in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.texture.width(), self.texture.height())
     }
 }
 
@@ -179,9 +320,14 @@ impl InstanceRaw {
     };
 }
 
-/// Draws lit, instanced meshes with one pipeline.
+/// Draws lit, instanced, optionally textured meshes with one pipeline.
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// Texture layout and sampler, shared with every [`TextureRegistry`]
+    /// made from this renderer.
+    binder: TextureBinder,
+    /// 1×1 white texture bound by [`Self::draw`].
+    white: GpuTexture,
     camera_buf: wgpu::Buffer,
     light_buf: wgpu::Buffer,
     material_buf: wgpu::Buffer,
@@ -195,8 +341,13 @@ impl MeshRenderer {
     /// depth attachment is always [`DEPTH_FORMAT`] (`Depth32Float`).
     ///
     /// Starts with an identity camera matrix, [`LightUniform::default`],
-    /// a white base colour, and room for one instance.
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    /// a white base colour, and room for one instance. `queue` uploads the
+    /// 1×1 white texture that untextured draws bind.
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render/mesh.wgsl").into()),
@@ -257,9 +408,21 @@ impl MeshRenderer {
             ],
         });
 
+        let binder = TextureBinder::new(device);
+        let white = binder.upload(
+            device,
+            queue,
+            &ImageData {
+                name: "white".into(),
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            },
+        );
+
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&binder.layout)],
             immediate_size: 0,
         });
 
@@ -303,6 +466,8 @@ impl MeshRenderer {
         let instance_cap = 1;
         Self {
             pipeline,
+            binder,
+            white,
             camera_buf,
             light_buf,
             material_buf,
@@ -361,10 +526,28 @@ impl MeshRenderer {
         queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
     }
 
-    /// Draws `mesh` once per instance in `instances`, a range of indices
-    /// into the slice last passed to [`Self::upload_instances`]. Several
-    /// draws with disjoint ranges can share one pass.
+    /// The 1×1 white texture [`Self::draw`] binds.
+    pub fn white_texture(&self) -> &GpuTexture {
+        &self.white
+    }
+
+    /// Draws `mesh` untextured once per instance in `instances`, a range of
+    /// indices into the slice last passed to [`Self::upload_instances`].
+    /// Several draws with disjoint ranges can share one pass.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &GpuMesh, instances: Range<u32>) {
+        self.draw_textured(pass, mesh, &self.white, instances);
+    }
+
+    /// [`Self::draw`] with `texture` as the base-colour texture. `texture`
+    /// must come from this renderer ([`GpuTexture::upload`] or a
+    /// [`TextureRegistry`] made from it).
+    pub fn draw_textured(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: &GpuMesh,
+        texture: &GpuTexture,
+        instances: Range<u32>,
+    ) {
         if instances.is_empty() {
             return;
         }
@@ -377,6 +560,7 @@ impl MeshRenderer {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &texture.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, self.instance_buf.slice(bytes));
         pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -444,10 +628,15 @@ fn mesh_pass<'e>(
 }
 
 /// Identifies a mesh uploaded to a [`MeshRegistry`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MeshHandle(pub u32);
 
-/// Component: draw this entity's [`Transform`] with `mesh`, tinted `color`.
+/// Identifies a texture uploaded to a [`TextureRegistry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TextureHandle(pub u32);
+
+/// Component: draw this entity's [`Transform`] with `mesh`, tinted `color`,
+/// optionally with a base-colour `texture`.
 ///
 /// [`render_world`] draws every entity that has both a [`Transform`] and a
 /// `MeshInstance`.
@@ -457,6 +646,9 @@ pub struct MeshInstance {
     pub mesh: MeshHandle,
     /// Linear RGBA colour, multiplied into the material base colour.
     pub color: [f32; 4],
+    /// Base-colour texture, multiplied into `color`; `None` draws
+    /// untextured (as if with a white texture).
+    pub texture: Option<TextureHandle>,
 }
 
 /// GPU meshes addressed by [`MeshHandle`]. Meshes are never removed, so a
@@ -542,51 +734,159 @@ impl MeshRegistry {
     }
 }
 
-/// Resource holding the renderer, the meshes, the light, and the per-mesh
-/// instance scratch space that [`render_world`] refills every frame.
+/// Base-colour textures addressed by [`TextureHandle`]. Textures are never
+/// removed, so a handle stays valid for the registry's lifetime.
+///
+/// Like [`MeshRegistry`], each entry records the [`AssetSource`] it was
+/// loaded from when it came through [`crate::asset::Assets`].
+pub struct TextureRegistry {
+    /// Layout and sampler of the renderer the textures are drawn with.
+    binder: TextureBinder,
+    textures: Vec<GpuTexture>,
+    /// `sources[i]` is where `textures[i]` came from, if known.
+    sources: Vec<Option<AssetSource>>,
+}
+
+impl TextureRegistry {
+    /// An empty registry whose textures can be drawn by `renderer`.
+    pub fn new(renderer: &MeshRenderer) -> Self {
+        Self {
+            binder: renderer.binder.clone(),
+            textures: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    /// Uploads `image` and returns its handle. The texture has no
+    /// [`AssetSource`]; prefer [`crate::asset::Assets::texture`].
+    pub fn add(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageData,
+    ) -> TextureHandle {
+        let texture = self.binder.upload(device, queue, image);
+        self.push(texture, None)
+    }
+
+    /// Uploads `image`, records that it was loaded from `source`, and
+    /// returns its handle. Does not deduplicate; [`crate::asset::Assets`]
+    /// does.
+    pub fn add_with_source(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageData,
+        source: AssetSource,
+    ) -> TextureHandle {
+        let texture = self.binder.upload(device, queue, image);
+        self.push(texture, Some(source))
+    }
+
+    fn push(&mut self, texture: GpuTexture, source: Option<AssetSource>) -> TextureHandle {
+        let handle = TextureHandle(self.textures.len() as u32);
+        self.textures.push(texture);
+        self.sources.push(source);
+        handle
+    }
+
+    /// Where the texture behind `h` was loaded from, if it was added with
+    /// [`Self::add_with_source`]. `None` also for unknown handles.
+    pub fn source(&self, h: TextureHandle) -> Option<&AssetSource> {
+        self.sources.get(h.0 as usize)?.as_ref()
+    }
+
+    /// The texture behind `h`.
+    ///
+    /// # Panics
+    ///
+    /// If `h` did not come from this registry.
+    pub fn get(&self, h: TextureHandle) -> &GpuTexture {
+        &self.textures[h.0 as usize]
+    }
+
+    /// Every texture with its handle, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (TextureHandle, &GpuTexture)> {
+        self.textures
+            .iter()
+            .enumerate()
+            .map(|(i, texture)| (TextureHandle(i as u32), texture))
+    }
+
+    /// Whether `h` points at a texture in this registry.
+    pub fn contains(&self, h: TextureHandle) -> bool {
+        (h.0 as usize) < self.textures.len()
+    }
+
+    /// Number of textures added so far.
+    pub fn len(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Whether no texture has been added.
+    pub fn is_empty(&self) -> bool {
+        self.textures.is_empty()
+    }
+}
+
+/// What one instanced draw shares: a mesh and an optional texture. Ordered
+/// so a mesh's untextured batch comes before its textured ones.
+type BatchKey = (MeshHandle, Option<TextureHandle>);
+
+/// Resource holding the renderer, the meshes and textures, the light, and
+/// the per-batch instance scratch space that [`render_world`] refills every
+/// frame.
 pub struct RenderState {
     /// The lit mesh pipeline and its instance buffer.
     pub renderer: MeshRenderer,
     /// Meshes that [`MeshInstance::mesh`] handles point into.
     pub registry: MeshRegistry,
+    /// Textures that [`MeshInstance::texture`] handles point into.
+    pub textures: TextureRegistry,
     /// Light uploaded at the start of every [`render_world`].
     pub light: LightUniform,
-    /// Number of `draw` calls (one per mesh with at least one instance)
-    /// made by the last [`render_world`].
+    /// Number of `draw` calls (one per distinct (mesh, texture) pair with
+    /// at least one instance) made by the last [`render_world`].
     pub last_frame_draw_calls: u32,
-    /// Instances per mesh, indexed by `MeshHandle.0`. Cleared, not freed,
-    /// each frame so the allocations are reused.
-    batches: Vec<Vec<InstanceRaw>>,
+    /// Instances per (mesh, texture) pair, in key order. Cleared, not
+    /// freed, each frame so the allocations are reused.
+    batches: BTreeMap<BatchKey, Vec<InstanceRaw>>,
     /// All batches back to back, as uploaded to the instance buffer.
     instances: Vec<InstanceRaw>,
 }
 
 impl RenderState {
-    /// A renderer for colour targets of `color_format`, with no meshes and
-    /// [`LightUniform::default`].
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    /// A renderer for colour targets of `color_format`, with no meshes or
+    /// textures and [`LightUniform::default`].
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) -> Self {
+        let renderer = MeshRenderer::new(device, queue, color_format);
         Self {
-            renderer: MeshRenderer::new(device, color_format),
+            textures: TextureRegistry::new(&renderer),
+            renderer,
             registry: MeshRegistry::new(),
             light: LightUniform::default(),
             last_frame_draw_calls: 0,
-            batches: Vec::new(),
+            batches: BTreeMap::new(),
             instances: Vec::new(),
         }
     }
 }
 
 /// Draws every entity with a [`Transform`] and a [`MeshInstance`] as seen
-/// by the [`Camera`] resource: one instanced draw call per mesh, all in one
-/// pass.
+/// by the [`Camera`] resource: one instanced draw call per distinct
+/// (mesh, texture) pair, all in one pass.
 ///
 /// `color` and `depth` are loaded, not cleared (the game loop and
 /// [`crate::headless::Headless`] clear both before rendering). `aspect` is
 /// the target's width / height. Batches are rebuilt from the world on every
 /// call, so spawned, moved, and despawned entities show up immediately.
 ///
-/// Entities whose mesh handle is not in the registry are skipped with a
-/// warning.
+/// Entities whose mesh or texture handle is not in its registry are
+/// skipped with a warning.
 ///
 /// # Panics
 ///
@@ -602,33 +902,36 @@ pub fn render_world(
     let camera = *res.expect::<Camera>();
     let state = res.expect_mut::<RenderState>();
 
-    // Group instances by mesh.
-    state.batches.resize_with(state.registry.len(), Vec::new);
-    state.batches.iter_mut().for_each(Vec::clear);
+    // Group instances by (mesh, texture).
+    state.batches.values_mut().for_each(Vec::clear);
     let mut unknown = 0;
     for (transform, instance) in world.query_mut::<(&Transform, &MeshInstance)>() {
-        match state.batches.get_mut(instance.mesh.0 as usize) {
-            Some(batch) => batch.push(InstanceRaw::from_transform(transform, instance.color)),
-            None => unknown += 1,
+        let known = state.registry.contains(instance.mesh)
+            && instance.texture.is_none_or(|t| state.textures.contains(t));
+        if !known {
+            unknown += 1;
+            continue;
         }
+        state
+            .batches
+            .entry((instance.mesh, instance.texture))
+            .or_default()
+            .push(InstanceRaw::from_transform(transform, instance.color));
     }
     if unknown > 0 {
-        log::warn!("skipped {unknown} entities whose mesh is not in the registry");
+        log::warn!("skipped {unknown} entities whose mesh or texture is not in its registry");
     }
 
     // Lay the batches out back to back, remembering each one's range.
     state.instances.clear();
     let mut draws = Vec::new();
-    for (index, batch) in state.batches.iter().enumerate() {
+    for (&key, batch) in &state.batches {
         if batch.is_empty() {
             continue;
         }
         let start = state.instances.len() as u32;
         state.instances.extend_from_slice(batch);
-        draws.push((
-            MeshHandle(index as u32),
-            start..state.instances.len() as u32,
-        ));
+        draws.push((key, start..state.instances.len() as u32));
     }
 
     state.renderer.set_camera(&ctx.queue, &camera, aspect);
@@ -650,9 +953,15 @@ pub fn render_world(
             wgpu::LoadOp::Load,
             wgpu::LoadOp::Load,
         );
-        for (handle, range) in &draws {
-            let mesh = state.registry.get(*handle);
-            state.renderer.draw(&mut pass, mesh, range.clone());
+        for ((mesh, texture), range) in &draws {
+            let mesh = state.registry.get(*mesh);
+            let texture = match texture {
+                Some(handle) => state.textures.get(*handle),
+                None => state.renderer.white_texture(),
+            };
+            state
+                .renderer
+                .draw_textured(&mut pass, mesh, texture, range.clone());
         }
     }
     ctx.queue.submit([encoder.finish()]);
@@ -734,7 +1043,7 @@ mod tests {
         let target = OffscreenTarget::new(&ctx.device, 32, 32);
         let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
-        let mut renderer = MeshRenderer::new(&ctx.device, OFFSCREEN_COLOR_FORMAT);
+        let mut renderer = MeshRenderer::new(&ctx.device, &ctx.queue, OFFSCREEN_COLOR_FORMAT);
         let mut camera = Camera {
             transform: Transform::from_translation(Vec3::new(0.0, 2.0, 5.0)),
             projection: Projection::Perspective {
