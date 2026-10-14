@@ -266,6 +266,27 @@ fn y_of(engine: &Headless, id: u64) -> f32 {
         .y
 }
 
+/// The example's script compiles and orbits: radius kept, angle advanced
+/// by `speed * t`.
+#[test]
+fn example_orbit_script_orbits() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let (mut world, mut res, mut schedule, entity) =
+        scripted_world(&examples, "scripts/orbit.rhai");
+    for _ in 0..60 {
+        fixed_step(&mut world, &mut res, &mut schedule, DT);
+    }
+    assert_eq!(res.expect::<ScriptEngine>().errors().count(), 0);
+    let p = translation(&world, entity);
+    let radius = (p.x * p.x + p.z * p.z).sqrt();
+    assert!((radius - 2.0).abs() < 1e-3, "radius kept: {p}");
+    let angle = (-p.z).atan2(p.x);
+    assert!(
+        (angle - 0.8).abs() < 1e-3,
+        "turned 0.8 rad in one second: {angle}"
+    );
+}
+
 #[test]
 fn tools_are_listed() {
     let tools = ToolRegistry::with_engine_tools().list();

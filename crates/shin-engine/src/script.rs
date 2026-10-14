@@ -18,6 +18,11 @@
 //! written back to the entity after the call. Scripts cannot spawn
 //! entities or call each other.
 //!
+//! Only `update` (and the functions it calls) runs; statements outside
+//! functions do not. Rhai functions cannot see outer variables, so keep
+//! settings as `let`s inside `update` or as helper functions
+//! (`fn speed() { 0.8 }`).
+//!
 //! [`script_system`] runs the scripts. It runs only while the
 //! [`PlayState`] resource is playing and not paused; a world with no
 //! `PlayState` at all (a game running outside the editor, such as
@@ -27,7 +32,7 @@
 //!
 //! Script paths are relative to the [`Assets`] root (the project directory
 //! once a project is open, otherwise the working directory). Hot reload:
-//! once a second (wall clock) the system checks each loaded script's file
+//! twice a second (wall clock) the system checks each loaded script's file
 //! modification time and recompiles the ones that changed. A script that
 //! fails to compile, or fails while running, does not stop the engine: the
 //! error is logged as `path:line: message` and kept for `script.errors`
@@ -62,7 +67,8 @@ use bindings::{ScriptEntity, ScriptTransform};
 pub const UPDATE_FN: &str = "update";
 
 /// How often [`script_system`] checks script files for changes.
-pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Half a second, so an edit takes effect within one second.
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The most Rhai operations one script call may run before it is stopped
 /// with an error, so a script stuck in a loop cannot freeze the engine.
