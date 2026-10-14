@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "engine": {
+    "shin": {
       "type": "stdio",
       "command": "cargo",
-      "args": ["run", "-q", "-p", "engine-mcp"],
+      "args": ["run", "-q", "-p", "shin-mcp"],
       "env": {}
     }
   }

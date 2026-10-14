@@ -1,0 +1,30 @@
+[package]
+name = "shin-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shin: a small, fast, cross-platform 3D engine that humans, scripts, and AI agents drive through the same API."
+
+[lib]
+name = "shin"
+path = "src/lib.rs"
+
+[dependencies]
+winit = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+glam = { workspace = true }
+hecs = { workspace = true }
+gltf = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]

@@ -41,6 +41,13 @@ base64 = "0.23"
 # Milestone 2 (not yet used; pinned so adding them later is conflict-free)
 rhai = "1.26"
 rapier3d = "0.36"
+egui = "0.36"
+egui-wgpu = { version = "0.36", features = ["winit"] }
+egui-winit = "0.36"
+egui_dock = "0.21"
+ron = "0.12"
+toml = "1.1"
+clap = { version = "4.6", features = ["derive"] }
 
 [profile.dev]
 opt-level = 1            # keep debug builds usable for a real-time loop

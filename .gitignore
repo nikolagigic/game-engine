@@ -16,4 +16,4 @@
 .vscode/
 
 # Golden-test diff output
-/crates/engine/tests/golden/_diff/
+/crates/shin-engine/tests/golden/_diff/

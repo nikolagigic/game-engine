@@ -7,7 +7,10 @@ the tech lead also pastes your ticket into your brief when needed.
 
 ## What we are building
 
-A small, readable, open-source 3D game engine, end-to-end in Rust. The MVP
+**Shin Engine**: a small, fast, cross-platform 3D engine that humans,
+scripts, and AI agents all drive through the same API (ADR 0007). Small,
+readable, open source, end-to-end in Rust. The crates.io package is
+`shin-engine`; the library is `shin`, so code reads `use shin::...`. The MVP
 proves one architecture: a wgpu renderer, a winit window, a fixed-timestep
 loop, a hecs ECS, glTF meshes, instanced drawing, and headless golden-image
 tests. Readability beats cleverness. Small public APIs beat flexible ones.
@@ -32,17 +35,18 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
    wrap them. Right-handed, Y-up, column-major, depth 0..1 (wgpu convention).
 5. **Headless golden-image tests are the E2E tests.** A scene is rendered to
    an offscreen texture, read back, and compared against a PNG in
-   `crates/engine/tests/golden/`. Correctness is checked, not eyeballed.
-6. **Single `engine` crate, one module per subsystem.** Tickets map to
-   modules so parallel PRs rarely touch the same file. `lib.rs` is module
+   `crates/shin-engine/tests/golden/`. Correctness is checked, not eyeballed.
+6. **Single `shin-engine` crate (library `shin`), one module per
+   subsystem.** Tickets map to modules so parallel PRs rarely touch the
+   same file. `lib.rs` is module
    declarations only. All dependencies are pinned in the workspace
    `Cargo.toml`; crate manifests use `{ workspace = true }`.
 7. **Fixed timestep for simulation, variable for rendering.** Simulation
    ticks at a fixed `dt` (default 1/60 s) with an accumulator; rendering
    runs once per frame with an interpolation alpha available.
-8. **Engine-native tool registry; MCP is one transport.** `engine::tool`
+8. **Engine-native tool registry; MCP is one transport.** `shin::tool`
    holds named, JSON-schema'd operations on a `Headless` engine. The
-   `engine-mcp` crate exposes that registry over stdio with `rmcp`; the
+   `shin-mcp` crate exposes that registry over stdio with `rmcp`; the
    engine lib never depends on tokio or rmcp. Every ticket that adds a
    user-facing capability registers a tool for it (`<subsystem>.<verb>`)
    in the same PR, with a test through the registry. This is how agents,
@@ -62,7 +66,7 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 | `stats`  | frame-time ring buffer and reporting                       | GE-009         |
 | `tool`   | `Tool` trait, `ToolRegistry`, `ToolOutput`                 | GE-013, GE-015 |
 | `headless` | window-less engine handle for tools, tests, benchmarks   | GE-013         |
-| crate `engine-mcp` | stdio MCP server over the registry               | GE-014         |
+| crate `shin-mcp`   | stdio MCP server over the registry               | GE-014         |
 
 Public API surface should stay small. Prefer `pub(crate)` until a ticket
 explicitly asks for a public type.
@@ -88,10 +92,10 @@ explicitly asks for a public type.
   `glam::camera::rh::proj::directx` (right-handed, +Y up NDC, depth 0..1,
   which is wgpu's convention), already wrapped by `math::Camera`.
 - Tests: unit tests in-module under `#[cfg(test)]`; integration and golden
-  tests in `crates/engine/tests/`. Every ticket says which test command
+  tests in `crates/shin-engine/tests/`. Every ticket says which test command
   proves its acceptance criteria.
 - Examples are the manual smoke test. Each rendering ticket adds or updates
-  one example under `crates/engine/examples/`.
+  one example under `crates/shin-engine/examples/`.
 
 ## Build directory (important for parallel worktrees)
 
