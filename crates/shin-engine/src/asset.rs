@@ -1,7 +1,9 @@
 //! glTF and texture loading into CPU-side structs. Owned by GE-005.
 //!
-//! Everything here is plain Rust data; no GPU types appear in this module.
-//! The renderer (GE-006) uploads [`MeshData`] and [`ImageData`] to the GPU.
+//! Loading produces plain Rust data; the renderer (GE-006) uploads
+//! [`MeshData`] and [`ImageData`] to the GPU. The one exception is the
+//! [`Assets`] resource (GE-019), which maps stable [`AssetSource`] names
+//! (`builtin://cube`, `assets/x.gltf#2`) to uploaded meshes.
 //!
 //! Loading flattens a glTF document:
 //!
@@ -14,9 +16,11 @@
 //! - missing normals are replaced by flat per-triangle normals, which
 //!   duplicates vertices so each triangle owns its three corners.
 //!
-//! Tools (GE-015): [`register_tools`] adds `scene.load_gltf` and
-//! `mesh.builtin`, which upload into the renderer's mesh registry.
+//! Tools (GE-015, GE-019): [`register_tools`] adds `asset.load`,
+//! `scene.load_gltf`, and `mesh.builtin`, which all upload through
+//! [`Assets`] into the renderer's mesh registry.
 
+mod registry;
 mod tools;
 
 use std::f32::consts::PI;
@@ -27,6 +31,7 @@ use glam::{Mat4, Vec3};
 
 use crate::math::Transform;
 
+pub use registry::{AssetSource, Assets};
 pub use tools::register_tools;
 
 /// One mesh vertex as the renderer consumes it.

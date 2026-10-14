@@ -17,7 +17,8 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "mesh.list",
         "Lists every mesh uploaded to the renderer: its handle (pass it to entity.spawn), \
-         name, and vertex and index counts.",
+         name, vertex and index counts, and source (an asset source string such as \
+         \"builtin://cube\" or \"assets/x.gltf#1\", or null for meshes added from code).",
         mesh_list,
     ));
     reg.register(TypedTool::new(
@@ -56,6 +57,7 @@ fn mesh_list(engine: &mut Headless, _: MeshListArgs) -> anyhow::Result<ToolOutpu
                 "name": mesh.name,
                 "vertices": mesh.vertex_count,
                 "indices": mesh.index_count,
+                "source": state.registry.source(handle).map(|s| s.to_string()),
             })
         })
         .collect();
@@ -235,8 +237,15 @@ mod tests {
         let list = call_json(&reg, &mut engine, "mesh.list", json!({}))?;
         assert_eq!(
             list,
-            json!([{ "handle": 0, "name": "cube", "vertices": 24, "indices": 36 }])
+            json!([{ "handle": 0, "name": "cube", "vertices": 24, "indices": 36, "source": null }])
         );
+        let source = crate::asset::AssetSource::parse("builtin://cube")?;
+        let state = engine.resources.expect_mut::<RenderState>();
+        state
+            .registry
+            .add_with_source(&engine.gpu.device, &crate::asset::cube(), source);
+        let list = call_json(&reg, &mut engine, "mesh.list", json!({}))?;
+        assert_eq!(list[1]["source"], "builtin://cube");
         Ok(())
     }
 

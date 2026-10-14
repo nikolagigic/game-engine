@@ -1,18 +1,29 @@
-//! Asset tools (GE-015): `scene.load_gltf` and `mesh.builtin`. Both create
-//! CPU-side meshes here and upload them into the renderer's
-//! [`MeshRegistry`](crate::render::MeshRegistry).
+//! Asset tools (GE-015, GE-019): `asset.load`, `scene.load_gltf`, and
+//! `mesh.builtin`. All three resolve [`AssetSource`]s through the [`Assets`]
+//! resource, which uploads each source once into the renderer's
+//! [`MeshRegistry`].
+
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::registry::sphere_name;
+use super::{AssetSource, Assets};
 use crate::headless::Headless;
-use crate::render::{MeshInstance, RenderState};
+use crate::render::{MeshInstance, MeshRegistry, RenderState};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
-/// Registers `scene.load_gltf` and `mesh.builtin`.
+/// Registers `asset.load`, `scene.load_gltf`, and `mesh.builtin`.
 pub fn register_tools(reg: &mut ToolRegistry) {
+    reg.register(TypedTool::new(
+        "asset.load",
+        "Uploads the mesh named by an asset source and returns its handle for \
+         entity.spawn. Loading the same source again returns the same handle.",
+        asset_load,
+    ));
     reg.register(TypedTool::new(
         "scene.load_gltf",
         "Loads a glTF 2.0 file (.gltf or .glb), uploads its meshes, and spawns one \
@@ -28,6 +39,48 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     ));
 }
 
+/// Runs `f` with the [`Assets`] resource, the GPU device, and the mesh
+/// registry borrowed together.
+///
+/// [`crate::ecs::Resources`] hands out one mutable borrow at a time, so the
+/// `Assets` value is moved out for the call and put back afterwards.
+fn with_assets<R>(
+    engine: &mut Headless,
+    f: impl FnOnce(&mut Assets, &wgpu::Device, &mut MeshRegistry) -> R,
+) -> anyhow::Result<R> {
+    let slot = engine
+        .resources
+        .get_mut::<Assets>()
+        .context("no Assets resource")?;
+    let mut assets = std::mem::replace(slot, Assets::new(PathBuf::new()));
+    let result = match engine.resources.get_mut::<RenderState>() {
+        Some(state) => Ok(f(&mut assets, &engine.gpu.device, &mut state.registry)),
+        None => Err(anyhow::anyhow!("no RenderState resource")),
+    };
+    engine.resources.insert(assets);
+    result
+}
+
+/// Arguments of `asset.load`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AssetLoadArgs {
+    /// Asset source: "builtin://cube", "builtin://sphere" (32x16),
+    /// "builtin://sphere-<segments>x<rings>", or a glTF path with an optional
+    /// triangle-primitive index, e.g. "assets/x.gltf" or "assets/x.gltf#2".
+    /// Relative paths are resolved against the project directory (the
+    /// engine's working directory).
+    source: String,
+}
+
+fn asset_load(engine: &mut Headless, args: AssetLoadArgs) -> anyhow::Result<ToolOutput> {
+    let source = AssetSource::parse(&args.source)?;
+    let handle = with_assets(engine, |assets, device, registry| {
+        assets.mesh(device, registry, &source)
+    })??;
+    Ok(ToolOutput::Json(json!({ "handle": handle.0 })))
+}
+
 /// Arguments of `scene.load_gltf`.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -37,17 +90,30 @@ struct LoadGltfArgs {
     path: String,
 }
 
+/// `scene.load_gltf` reads the file once and caches each triangle primitive
+/// under its own `path#index` source, so it shares meshes with `asset.load`.
 fn load_gltf(engine: &mut Headless, args: LoadGltfArgs) -> anyhow::Result<ToolOutput> {
-    let scene = super::load_gltf(&args.path)?;
-    let state = engine
+    let path = PathBuf::from(&args.path);
+    let resolved = engine
         .resources
-        .get_mut::<RenderState>()
-        .context("no RenderState resource")?;
-    let handles: Vec<_> = scene
-        .meshes
-        .iter()
-        .map(|mesh| state.registry.add(&engine.gpu.device, mesh))
-        .collect();
+        .get::<Assets>()
+        .context("no Assets resource")?
+        .resolve(&path);
+    let scene = super::load_gltf(resolved)?;
+    let handles = with_assets(engine, |assets, device, registry| {
+        scene
+            .meshes
+            .iter()
+            .enumerate()
+            .map(|(index, mesh)| {
+                let source = AssetSource::File {
+                    path: path.clone(),
+                    index,
+                };
+                assets.mesh_from_data(device, registry, &source, mesh)
+            })
+            .collect::<Vec<_>>()
+    })?;
 
     let mut entities = Vec::new();
     for node in &scene.nodes {
@@ -90,24 +156,22 @@ struct BuiltinArgs {
     rings: Option<u32>,
 }
 
+/// `mesh.builtin` is `asset.load` with a `builtin://` source built from its
+/// arguments.
 fn mesh_builtin(engine: &mut Headless, args: BuiltinArgs) -> anyhow::Result<ToolOutput> {
-    let data = match args.kind {
-        BuiltinKind::Cube => super::cube(),
+    let name = match args.kind {
+        BuiltinKind::Cube => "cube".to_string(),
         BuiltinKind::Sphere => {
-            let segments = args.segments.unwrap_or(32);
-            let rings = args.rings.unwrap_or(16);
-            anyhow::ensure!(
-                segments <= 1024 && rings <= 1024,
-                "segments and rings must be at most 1024, got {segments} and {rings}"
-            );
-            super::uv_sphere(segments, rings)
+            // Values below the minimum are raised to it, as `uv_sphere` does.
+            let segments = args.segments.unwrap_or(32).max(3);
+            let rings = args.rings.unwrap_or(16).max(2);
+            sphere_name(segments, rings)
         }
     };
-    let state = engine
-        .resources
-        .get_mut::<RenderState>()
-        .context("no RenderState resource")?;
-    let handle = state.registry.add(&engine.gpu.device, &data);
+    let source = AssetSource::Builtin(name);
+    let handle = with_assets(engine, |assets, device, registry| {
+        assets.mesh(device, registry, &source)
+    })??;
     Ok(ToolOutput::Json(json!({ "handle": handle.0 })))
 }
 
@@ -160,6 +224,57 @@ mod tests {
     }
 
     #[test]
+    fn asset_load_caches_by_source_and_lists_it() -> anyhow::Result<()> {
+        let reg = ToolRegistry::with_engine_tools();
+        let info = reg
+            .list()
+            .into_iter()
+            .find(|t| t.name == "asset.load")
+            .expect("asset.load is registered");
+        let field = &info.input_schema["properties"]["source"];
+        assert!(
+            field["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("builtin://cube")),
+            "{field}"
+        );
+
+        let mut engine = Headless::new(8, 8)?;
+        let load = |engine: &mut Headless, source: &str| {
+            call_json(&reg, engine, "asset.load", json!({ "source": source }))
+        };
+        assert_eq!(load(&mut engine, "builtin://cube")?, json!({ "handle": 0 }));
+        assert_eq!(load(&mut engine, "builtin://cube")?, json!({ "handle": 0 }));
+        // mesh.builtin goes through the same cache.
+        assert_eq!(
+            call_json(&reg, &mut engine, "mesh.builtin", json!({ "kind": "cube" }))?,
+            json!({ "handle": 0 })
+        );
+        let gltf = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/test/cube.gltf");
+        let gltf = gltf.to_str().expect("UTF-8 path");
+        assert_eq!(load(&mut engine, gltf)?, json!({ "handle": 1 }));
+        assert_eq!(
+            load(&mut engine, &format!("{gltf}#0"))?,
+            json!({ "handle": 1 })
+        );
+        assert_eq!(engine.resources.expect::<RenderState>().registry.len(), 2);
+
+        let list = call_json(&reg, &mut engine, "mesh.list", json!({}))?;
+        assert_eq!(list[0]["source"], "builtin://cube");
+        assert_eq!(list[1]["source"], gltf);
+
+        for bad in ["builtin://torus", "", "x.gltf#nope"] {
+            let err = reg
+                .call(&mut engine, "asset.load", json!({ "source": bad }))
+                .unwrap_err();
+            assert!(matches!(err, ToolError::Failed(_)), "{bad:?}: {err:?}");
+        }
+        // A failed load leaves the cache in place.
+        assert_eq!(load(&mut engine, "builtin://cube")?, json!({ "handle": 0 }));
+        Ok(())
+    }
+
+    #[test]
     fn load_gltf_spawns_one_entity_per_mesh_node() -> anyhow::Result<()> {
         let reg = ToolRegistry::with_engine_tools();
         let mut engine = Headless::new(8, 8)?;
@@ -175,6 +290,19 @@ mod tests {
         assert!(!meshes.is_empty(), "{out}");
         assert!(!entities.is_empty(), "{out}");
         assert_eq!(engine.world.len() as usize, entities.len());
+
+        // Loading the file again spawns again but reuses the meshes.
+        let again = call_json(
+            &reg,
+            &mut engine,
+            "scene.load_gltf",
+            json!({ "path": path }),
+        )?;
+        assert_eq!(again["meshes"], out["meshes"]);
+        assert_eq!(engine.world.len() as usize, 2 * entities.len());
+        let list = call_json(&reg, &mut engine, "mesh.list", json!({}))?;
+        assert_eq!(list.as_array().map(Vec::len), Some(meshes.len()));
+        assert_eq!(list[0]["source"], path.to_str().expect("UTF-8 path"));
         Ok(())
     }
 
