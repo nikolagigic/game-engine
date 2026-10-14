@@ -4,8 +4,7 @@
 use std::path::Path;
 
 use shin::asset::{AssetSource, Assets};
-use shin::ecs::{Resources, World};
-use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT};
+use shin::headless::Headless;
 use shin::math::{Camera, Projection, Quat, Transform, Vec3};
 use shin::render::{LightUniform, MeshInstance, RenderState};
 
@@ -20,20 +19,17 @@ pub const SKY: wgpu::Color = wgpu::Color {
 /// The project's cube mesh, relative to the project directory.
 const CUBE: &str = "assets/cube.gltf";
 
-/// Fills `world` and `res` with the starter scene of the project in
-/// `project_dir`: a [`RenderState`] for offscreen targets with a
-/// directional light, an [`Assets`] cache rooted at the project, a
-/// perspective [`Camera`], a ground slab, and a cube resting on it.
+/// Sets up `engine` with the starter scene of the project in
+/// `project_dir`: the [`SKY`] clear colour, a directional light, an
+/// [`Assets`] cache rooted at the project, a perspective [`Camera`], a
+/// ground slab, and a cube resting on it.
 ///
 /// The cube mesh is the project's `assets/cube.gltf`; if that does not load,
 /// the built-in cube is used and a warning is logged.
-pub fn build(
-    world: &mut World,
-    res: &mut Resources,
-    gpu: &GpuContext,
-    project_dir: &Path,
-) -> anyhow::Result<()> {
-    let mut state = RenderState::new(&gpu.device, &gpu.queue, OFFSCREEN_COLOR_FORMAT);
+pub fn build(engine: &mut Headless, project_dir: &Path) -> anyhow::Result<()> {
+    engine.clear_color = SKY;
+    let gpu = &engine.gpu;
+    let state = engine.resources.expect_mut::<RenderState>();
     state.light = LightUniform {
         direction: [-0.6, -1.0, -0.4, 0.0],
         color: [1.0, 0.95, 0.85, 1.0],
@@ -51,7 +47,7 @@ pub fn build(
             )?
         }
     };
-    res.insert(state);
+    let res = &mut engine.resources;
     res.insert(assets);
     res.insert(Camera {
         transform: Transform::IDENTITY,
@@ -62,6 +58,7 @@ pub fn build(
         },
     });
 
+    let world = &mut engine.world;
     // Ground: the cube flattened into a slab whose top face is y = 0.
     world.spawn((
         Transform::from_trs(

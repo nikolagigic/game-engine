@@ -40,6 +40,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::command::Affected;
 use crate::headless::Headless;
 
 /// What a tool returns.
@@ -90,7 +91,18 @@ pub trait Tool: Send + Sync + 'static {
     /// Runs the tool on `engine` with `args`, which should match
     /// [`Self::input_schema`].
     fn call(&self, engine: &mut Headless, args: Value) -> Result<ToolOutput, ToolError>;
+    /// What state a call with `args` may change, so
+    /// [`crate::command::History`] can snapshot it for undo. Called before
+    /// the call runs. The default, [`Affected::None`], means the call is
+    /// not undoable and is not recorded.
+    fn affected(&self, engine: &Headless, args: &Value) -> Affected {
+        let _ = (engine, args);
+        Affected::None
+    }
 }
+
+/// How a [`TypedTool`] declares what it changes; see [`Tool::affected`].
+pub type AffectedFn = fn(&Headless, &Value) -> Affected;
 
 /// A [`Tool`] built from a typed args struct and a function.
 ///
@@ -104,6 +116,7 @@ pub struct TypedTool<A, F> {
     name: &'static str,
     description: &'static str,
     f: F,
+    affected: Option<AffectedFn>,
     // `fn(A)` keeps the adapter Send + Sync regardless of `A`.
     _args: PhantomData<fn(A)>,
 }
@@ -120,8 +133,16 @@ where
             name,
             description,
             f,
+            affected: None,
             _args: PhantomData,
         }
+    }
+
+    /// Declares what a call changes (see [`Tool::affected`]); without this
+    /// the tool reports [`Affected::None`].
+    pub fn with_affected(mut self, affected: AffectedFn) -> Self {
+        self.affected = Some(affected);
+        self
     }
 }
 
@@ -155,6 +176,11 @@ where
             }
         })?;
         Ok((self.f)(engine, typed)?)
+    }
+
+    fn affected(&self, engine: &Headless, args: &Value) -> Affected {
+        self.affected
+            .map_or(Affected::None, |affected| affected(engine, args))
     }
 }
 
@@ -273,7 +299,8 @@ impl ToolRegistry {
     /// `render.frame`), stats (`stats.summary`), projects
     /// (`project.new`), and scene files (`scene.save`, `scene.load`). This
     /// is the registry
-    /// `shin-mcp` serves.
+    /// `shin-mcp` serves. History (`history.undo`, `history.redo`) is
+    /// included too.
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
         crate::asset::register_tools(&mut registry);
@@ -282,6 +309,7 @@ impl ToolRegistry {
         crate::stats::register_tools(&mut registry);
         crate::project::register_tools(&mut registry);
         crate::scene::register_tools(&mut registry);
+        crate::command::register_tools(&mut registry);
         registry
     }
 
@@ -330,6 +358,20 @@ impl ToolRegistry {
             .ok_or_else(|| ToolError::Unknown(name.to_string()))?;
         log::debug!("tool call `{name}` {args}");
         tool.call(engine, args)
+    }
+
+    /// What calling the tool `name` with `args` may change (see
+    /// [`Tool::affected`]).
+    pub fn affected(
+        &self,
+        engine: &Headless,
+        name: &str,
+        args: &Value,
+    ) -> Result<Affected, ToolError> {
+        let tool = self
+            .find(name)
+            .ok_or_else(|| ToolError::Unknown(name.to_string()))?;
+        Ok(tool.affected(engine, args))
     }
 
     fn find(&self, name: &str) -> Option<&dyn Tool> {

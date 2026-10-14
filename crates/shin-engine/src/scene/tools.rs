@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::asset::Assets;
+use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::Transform;
 use crate::project::ProjectRoot;
@@ -27,13 +28,16 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          and the number of entities.",
         scene_save,
     ));
-    reg.register(TypedTool::new(
-        "scene.load",
-        "Replaces every entity with those in a .scene.ron file and applies its camera and \
+    reg.register(
+        TypedTool::new(
+            "scene.load",
+            "Replaces every entity with those in a .scene.ron file and applies its camera and \
          light, loading meshes by asset source. On error the scene is left unchanged. \
          Returns the number of entities spawned.",
-        scene_load,
-    ));
+            scene_load,
+        )
+        .with_affected(|_, _| Affected::Scene),
+    );
 }
 
 /// Arguments of `scene.save`.
