@@ -168,12 +168,19 @@ fn create_depth(
 /// are sRGB-encoded RGBA8, ready to save as PNG.
 pub const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+/// The non-sRGB twin of [`OFFSCREEN_COLOR_FORMAT`], allowed as a view format
+/// of [`OffscreenTarget::color`]. Sampling through such a view returns the
+/// stored sRGB-encoded bytes unchanged, which is what UI renderers that
+/// work in gamma space (egui) expect of a texture.
+pub const OFFSCREEN_GAMMA_VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
 /// A window-less render target: a colour texture that can be copied back to
-/// the CPU, plus a matching depth texture. Used by golden-image tests and
-/// headless rendering.
+/// the CPU, plus a matching depth texture. Used by golden-image tests,
+/// headless rendering, and the editor viewport.
 pub struct OffscreenTarget {
     /// Colour texture in [`OFFSCREEN_COLOR_FORMAT`], usable as a render
-    /// attachment and as a copy source.
+    /// attachment, a copy source, and a sampled texture (also through an
+    /// [`OFFSCREEN_GAMMA_VIEW_FORMAT`] view).
     pub color: wgpu::Texture,
     /// View of [`Self::color`], used as the colour attachment.
     pub color_view: wgpu::TextureView,
@@ -202,8 +209,10 @@ impl OffscreenTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OFFSCREEN_COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[OFFSCREEN_GAMMA_VIEW_FORMAT],
         });
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
         let (depth, depth_view) = create_depth(device, width, height);
