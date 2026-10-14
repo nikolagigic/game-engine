@@ -3,9 +3,10 @@
 //!
 //! The mode itself lives in the engine's [`shin::headless::PlayState`]
 //! resource, so Play from the toolbar and `sim.play` from the console (or an
-//! agent) are the same thing. The editor does not run the game's own code
-//! yet (scripts arrive with GE-011), so a project's systems do not run here;
-//! `--demo-orbit` registers [`orbit_demo`] so Play has something to show.
+//! agent) are the same thing. While playing, entities' Rhai scripts run
+//! (GE-011: the engine's default schedule holds `shin::script::script_system`).
+//! A project's compiled Rust systems do not run here; `--demo-orbit`
+//! registers [`orbit_demo`] as a stand-in for them.
 
 use std::time::Instant;
 

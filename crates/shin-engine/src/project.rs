@@ -309,6 +309,7 @@ fn starter_scene() -> SceneFile {
         mesh: Some("assets/cube.gltf".to_string()),
         color: Some(color),
         texture: None,
+        script: None,
     };
     SceneFile {
         camera: Some(CameraDesc {

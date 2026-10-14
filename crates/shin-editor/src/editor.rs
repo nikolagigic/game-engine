@@ -326,6 +326,11 @@ impl EditorCore {
             Action::Edit(Edit::Mesh(entity, source)) => {
                 edit::commit_mesh(reg, engine, entity, &source)?;
             }
+            Action::Edit(Edit::Script(entity, path)) => {
+                // A compile error is logged by the engine and shown in the
+                // inspector; the script stays attached.
+                edit::commit_script(reg, engine, entity, &path)?;
+            }
             Action::Open => self.open()?,
             Action::Save => self.save_as(self.scene_path.clone())?,
             Action::SaveAs(path) => self.save_as(path)?,
@@ -1175,6 +1180,67 @@ mod tests {
             starter + 1,
             "the history picks up where it was: the ground comes back"
         );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// GE-011: the inspector's Script field attaches a script with one
+    /// undoable edit, Play runs it, Stop puts the entity back, and a broken
+    /// script's error is what the inspector shows.
+    #[test]
+    fn inspector_script_runs_on_play_and_shows_errors() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root) = play_editor("script")?;
+        let project_dir = root.join("demo");
+        std::fs::create_dir_all(project_dir.join("scripts"))?;
+        std::fs::write(
+            project_dir.join("scripts/lift.rhai"),
+            "fn update(entity, dt) { entity.transform.translation.y += dt; }",
+        )?;
+        let cube = named(&core, "cube");
+        let start = *core.engine.world.get::<&Transform>(cube)?;
+
+        run_undo_redo(
+            &mut core,
+            None,
+            Action::Edit(Edit::Script(cube, "scripts/lift.rhai".to_string())),
+        )?;
+        assert_eq!(entities(&mut core)?[1]["script"], "scripts/lift.rhai");
+        assert_eq!(
+            crate::inspector::script_error(&core.engine, "scripts/lift.rhai".as_ref()),
+            None
+        );
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Play)?;
+        // Two quarter-second frames (the clock clamps a frame to 0.25 s).
+        for _ in 0..2 {
+            core.clock.advance(&mut core.engine, 0.25);
+        }
+        let y = core.engine.world.get::<&Transform>(cube)?.translation.y;
+        assert!(
+            (y - (start.translation.y + 0.5)).abs() < 1e-4,
+            "the script lifted the cube half a unit: {y} from {}",
+            start.translation.y
+        );
+        frame(&mut core, &gpu, &target, Vec::new());
+        core.try_run(Action::Stop)?;
+        assert_eq!(*core.engine.world.get::<&Transform>(cube)?, start);
+
+        std::fs::write(
+            project_dir.join("scripts/broken.rhai"),
+            "fn update(entity, dt) {\n  let = 1;\n}",
+        )?;
+        core.try_run(Action::Edit(Edit::Script(
+            cube,
+            "scripts/broken.rhai".to_string(),
+        )))?;
+        let error = crate::inspector::script_error(&core.engine, "scripts/broken.rhai".as_ref())
+            .expect("the compile error is kept for the inspector");
+        assert!(error.starts_with("scripts/broken.rhai:2: "), "{error}");
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Edit(Edit::Script(cube, String::new())))?;
+        assert!(entities(&mut core)?[1].get("script").is_none(), "cleared");
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

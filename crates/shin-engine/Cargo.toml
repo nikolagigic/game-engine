@@ -28,5 +28,6 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 toml = { workspace = true }
 ron = { workspace = true }
+rhai = { workspace = true }
 
 [dev-dependencies]

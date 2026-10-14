@@ -13,13 +13,14 @@
 //!             mesh: "builtin://cube",
 //!             color: (0.8, 0.1, 0.1, 1.0),
 //!             texture: "assets/checker.png",
+//!             script: "scripts/orbit.rhai",
 //!         ),
 //!     ],
 //! )
 //! ```
 //!
 //! [`save`] writes and [`load`] reads that format. Optional fields
-//! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, and every
+//! (`camera`, `light`, `name`, `mesh`, `color`, `texture`, `script`, and every
 //! transform part) may be left out, and are written without `Some(...)`.
 //! Unknown fields are an error naming the field. Meshes and textures
 //! (GE-025) are [`AssetSource`] strings, so a scene file is independent of
@@ -45,6 +46,7 @@ use crate::asset::{AssetSource, Assets};
 use crate::ecs::{Entity, Name, Resources, World};
 use crate::math::{Camera, Projection, Quat, Transform, Vec3};
 use crate::render::{LightUniform, MeshHandle, MeshInstance, RenderState, TextureHandle};
+use crate::script::Script;
 
 /// The scene format version [`save`] writes and [`load`] accepts.
 pub const VERSION: u32 = 1;
@@ -129,6 +131,10 @@ pub struct EntityDesc {
     /// Ignored without `mesh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<String>,
+    /// The entity's [`Script`] (GE-011): a `.rhai` path relative to the
+    /// project directory; none for an unscripted entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
 }
 
 /// A [`Transform`] in editable units.
@@ -188,8 +194,14 @@ impl SceneFile {
     pub fn capture(world: &World, res: &Resources) -> anyhow::Result<Self> {
         let state = res.get::<RenderState>();
         let mut rows: Vec<(u64, EntityDesc)> = Vec::new();
-        for (entity, transform, instance, name) in world
-            .query::<(Entity, &Transform, Option<&MeshInstance>, Option<&Name>)>()
+        for (entity, transform, instance, name, script) in world
+            .query::<(
+                Entity,
+                &Transform,
+                Option<&MeshInstance>,
+                Option<&Name>,
+                Option<&Script>,
+            )>()
             .iter()
         {
             let id = entity.to_bits().get();
@@ -231,6 +243,7 @@ impl SceneFile {
                 mesh,
                 color,
                 texture,
+                script: script.map(|s| s.path.to_string_lossy().into_owned()),
             };
             rows.push((id, desc));
         }
@@ -349,6 +362,9 @@ pub fn apply(
         }
         if let Some(name) = &desc.name {
             world.insert_one(entity, Name(name.clone()))?;
+        }
+        if let Some(path) = &desc.script {
+            world.insert_one(entity, Script::new(path))?;
         }
     }
 

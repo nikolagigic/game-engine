@@ -12,7 +12,8 @@
 //! valid), and restores [`Time`].
 //!
 //! Only what a scene file holds survives a play session: entities with a
-//! [`Transform`] (their transform, mesh, colour, texture, and name), the
+//! [`Transform`] (their transform, mesh, colour, texture, name, and
+//! script), the
 //! camera, and the light. Other components and entities without a
 //! transform are gone after [`Headless::stop`].
 //!
@@ -28,6 +29,7 @@ use crate::ecs::{Entity, Name, Time};
 use crate::math::Transform;
 use crate::render::MeshInstance;
 use crate::scene::{self, SceneFile};
+use crate::script::Script;
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Resource: whether the scene is being edited or played. [`Headless`]
@@ -182,11 +184,22 @@ impl Headless {
 /// Respawns the entities [`scene::apply`] just spawned (in spawn order)
 /// under `ids`, one for one, keeping their scene components.
 fn restore_ids(world: &mut crate::ecs::World, ids: &[Entity]) -> anyhow::Result<()> {
-    type Row = (Transform, Option<MeshInstance>, Option<Name>);
+    type Row = (
+        Transform,
+        Option<MeshInstance>,
+        Option<Name>,
+        Option<Script>,
+    );
     let mut rows: Vec<(u64, Row)> = world
-        .query::<(Entity, &Transform, Option<&MeshInstance>, Option<&Name>)>()
+        .query::<(
+            Entity,
+            &Transform,
+            Option<&MeshInstance>,
+            Option<&Name>,
+            Option<&Script>,
+        )>()
         .iter()
-        .map(|(e, t, i, n)| (e.to_bits().get(), (*t, i.copied(), n.cloned())))
+        .map(|(e, t, i, n, s)| (e.to_bits().get(), (*t, i.copied(), n.cloned(), s.cloned())))
         .collect();
     anyhow::ensure!(
         rows.len() == ids.len(),
@@ -196,7 +209,7 @@ fn restore_ids(world: &mut crate::ecs::World, ids: &[Entity]) -> anyhow::Result<
     );
     rows.sort_by_key(|(bits, _)| *bits);
     world.clear();
-    for (&id, (_, (transform, instance, name))) in ids.iter().zip(rows) {
+    for (&id, (_, (transform, instance, name, script))) in ids.iter().zip(rows) {
         let mut builder = hecs::EntityBuilder::new();
         builder.add(transform);
         if let Some(instance) = instance {
@@ -204,6 +217,9 @@ fn restore_ids(world: &mut crate::ecs::World, ids: &[Entity]) -> anyhow::Result<
         }
         if let Some(name) = name {
             builder.add(name);
+        }
+        if let Some(script) = script {
+            builder.add(script);
         }
         world.spawn_at(id, builder.build());
     }
