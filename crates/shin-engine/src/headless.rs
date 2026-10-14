@@ -58,7 +58,19 @@ impl Headless {
             width > 0 && height > 0,
             "headless target must be at least 1x1, got {width}x{height}"
         );
-        let gpu = GpuContext::new(None)?;
+        Self::from_gpu(GpuContext::new(None)?, width, height)
+    }
+
+    /// [`Self::new`] on an existing GPU context, for example a clone of a
+    /// window's, so meshes the engine uploads can be drawn by the window
+    /// too.
+    ///
+    /// Fails if a dimension is zero.
+    pub fn from_gpu(gpu: GpuContext, width: u32, height: u32) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "headless target must be at least 1x1, got {width}x{height}"
+        );
         let target = OffscreenTarget::new(&gpu.device, width, height);
         let mut resources = Resources::new();
         resources.insert(Time::default());
@@ -113,13 +125,19 @@ impl Headless {
         }
     }
 
-    /// Renders one frame and reads it back.
+    /// Renders one frame ([`Self::render_to_target`]) and reads it back.
+    pub fn render(&mut self) -> anyhow::Result<image::RgbaImage> {
+        self.render_to_target();
+        self.target.read_pixels(&self.gpu)
+    }
+
+    /// Renders one frame into [`Self::target`] without reading it back.
     ///
     /// Sets `Time::frame_dt` and `Time::alpha` to zero (headless frames
     /// have no wall-clock duration and always land on a whole step), runs
     /// the frame systems, clears the target to [`Self::clear_color`] (depth
     /// to 1.0), then calls [`Self::render_fn`] if one is installed.
-    pub fn render(&mut self) -> anyhow::Result<image::RgbaImage> {
+    pub fn render_to_target(&mut self) {
         if self.resources.get::<Time>().is_none() {
             self.resources.insert(Time::default());
         }
@@ -139,7 +157,6 @@ impl Headless {
                 &self.target.depth_view,
             );
         }
-        self.target.read_pixels(&self.gpu)
     }
 
     /// [`Self::render`], encoded as a PNG.

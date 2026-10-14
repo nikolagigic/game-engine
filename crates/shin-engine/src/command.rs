@@ -3,8 +3,8 @@
 //!
 //! [`History::apply`] runs a tool through a [`ToolRegistry`] and records a
 //! [`Snapshot`] of what the tool touched before and after it ran. Which
-//! state that is, the tool declares through [`Tool::affected`]
-//! (`crate::tool::Tool::affected`). [`History::undo`] restores the
+//! state that is, the tool declares through
+//! [`Tool::affected`](crate::tool::Tool::affected). [`History::undo`] restores the
 //! "before" snapshot and [`History::redo`] the "after" one.
 //!
 //! The engine keeps one [`History`] as a resource in
@@ -340,12 +340,12 @@ impl History {
     }
 
     /// The undoable calls, oldest first, as `(tool, args)`.
-    pub fn undo_entries(&self) -> impl Iterator<Item = (&str, &Value)> {
+    pub fn undo_entries(&self) -> impl DoubleEndedIterator<Item = (&str, &Value)> {
         self.undo.iter().map(|e| (e.tool.as_str(), &e.args))
     }
 
     /// The redoable calls, the next one to redo last, as `(tool, args)`.
-    pub fn redo_entries(&self) -> impl Iterator<Item = (&str, &Value)> {
+    pub fn redo_entries(&self) -> impl DoubleEndedIterator<Item = (&str, &Value)> {
         self.redo.iter().map(|e| (e.tool.as_str(), &e.args))
     }
 

@@ -11,6 +11,13 @@ use anyhow::Context as _;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// The core wgpu objects every subsystem needs.
+///
+/// Cloning is cheap: the wgpu handles are reference-counted, so a clone
+/// shares the same device and queue (the editor gives its [`Headless`]
+/// engine a clone of the window's context).
+///
+/// [`Headless`]: crate::headless::Headless
+#[derive(Clone)]
 pub struct GpuContext {
     /// The wgpu instance the adapter (and any surface) was created from.
     pub instance: wgpu::Instance,

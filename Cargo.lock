@@ -2817,6 +2817,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "serde_json",
  "shin-engine",
  "wgpu",
  "winit",

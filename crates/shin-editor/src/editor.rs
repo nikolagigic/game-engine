@@ -1,7 +1,10 @@
 //! The editor frame: run the egui UI, render the scene into the viewport's
 //! [`OffscreenTarget`], and paint the UI over the output view.
 //!
-//! [`EditorCore`] does one frame given egui input and an output view, so the
+//! [`EditorCore`] owns a [`Headless`] engine (on a clone of the window's
+//! GPU context) and a [`ToolRegistry`]; every edit (console line, undo,
+//! redo) goes through the engine's command history ([`shin::command`]).
+//! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
 //! an offscreen target instead of the surface).
@@ -12,25 +15,28 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use egui_dock::DockState;
 use shin::app::{AppConfig, Game};
-use shin::ecs::{Resources, World};
+use shin::command;
 use shin::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OFFSCREEN_GAMMA_VIEW_FORMAT, OffscreenTarget};
+use shin::headless::Headless;
 use shin::math::Camera;
 use shin::project::Project;
-use shin::render::{begin_mesh_pass, render_world};
+use shin::render::begin_mesh_pass;
+use shin::tool::{ToolOutput, ToolRegistry};
 use winit::window::Window;
 
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
 use crate::scene;
-use crate::ui::{self, EditorUi, Tab, Viewport};
+use crate::ui::{self, Action, Console, EditorUi, Tab, Viewport};
 
 /// Editor window size in logical pixels, and the `--screenshot` size in
 /// pixels (screenshots render at one pixel per point).
 pub const WINDOW_SIZE: [u32; 2] = [1600, 900];
 
-/// The scene's offscreen target and the egui texture id that shows it.
-struct ViewportTarget {
-    target: OffscreenTarget,
+/// The egui texture showing the engine's offscreen target, and the target
+/// size it was registered for.
+struct ViewportTexture {
+    size: [u32; 2],
     texture: egui::TextureId,
 }
 
@@ -40,12 +46,15 @@ pub struct EditorCore {
     /// Created on the first frame, when the output format is known.
     renderer: Option<egui_wgpu::Renderer>,
     dock: DockState<Tab>,
-    world: World,
-    resources: Resources,
+    /// The scene: world, resources, command history, offscreen target.
+    engine: Headless,
+    /// The tools the console and menus call.
+    registry: ToolRegistry,
     orbit: OrbitCamera,
     log: LogBuffer,
     viewport: Viewport,
-    viewport_target: Option<ViewportTarget>,
+    viewport_texture: Option<ViewportTexture>,
+    console: Console,
     quit: bool,
 }
 
@@ -58,19 +67,20 @@ impl EditorCore {
         project_dir: &Path,
         log: LogBuffer,
     ) -> anyhow::Result<Self> {
-        let mut world = World::new();
-        let mut resources = Resources::new();
-        scene::build(&mut world, &mut resources, gpu, project_dir)?;
+        // 1x1 until the Viewport panel has been laid out and asks for a size.
+        let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
+        scene::build(&mut engine, project_dir)?;
         Ok(Self {
             egui,
             renderer: None,
             dock: ui::default_layout(),
-            world,
-            resources,
+            engine,
+            registry: ToolRegistry::with_engine_tools(),
             orbit: OrbitCamera::default(),
             log,
             viewport: Viewport::default(),
-            viewport_target: None,
+            viewport_texture: None,
+            console: Console::default(),
             quit: false,
         })
     }
@@ -88,26 +98,38 @@ impl EditorCore {
         format: wgpu::TextureFormat,
         size_px: [u32; 2],
     ) -> egui::PlatformOutput {
-        let renderer = self.renderer.get_or_insert_with(|| {
-            egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default())
-        });
-
         let egui_ctx = self.egui.clone();
+        let mut actions = Vec::new();
         let mut full = egui_ctx.run_ui(input, |ui| {
             EditorUi {
-                world: &self.world,
+                engine: &self.engine,
                 log: &self.log,
                 orbit: &mut self.orbit,
                 viewport: &mut self.viewport,
+                console: &mut self.console,
+                actions: &mut actions,
                 quit: &mut self.quit,
             }
             .show(ui, &mut self.dock);
         });
+        for action in actions {
+            self.run(action);
+        }
 
-        sync_viewport_target(&mut self.viewport_target, &mut self.viewport, renderer, gpu);
-        if let Some(viewport) = &self.viewport_target {
-            self.orbit.apply(self.resources.expect_mut::<Camera>());
-            render_scene(&mut self.world, &mut self.resources, gpu, &viewport.target);
+        let renderer = self.renderer.get_or_insert_with(|| {
+            egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default())
+        });
+
+        sync_viewport_texture(
+            &mut self.viewport_texture,
+            &mut self.viewport,
+            &mut self.engine,
+            renderer,
+        );
+        if self.viewport_texture.is_some() {
+            self.orbit
+                .apply(self.engine.resources.expect_mut::<Camera>());
+            self.engine.render_to_target();
         }
 
         let screen = egui_wgpu::ScreenDescriptor {
@@ -157,40 +179,79 @@ impl EditorCore {
         full.platform_output
     }
 
+    /// Carries out what the UI asked for. Results and errors go to the log
+    /// and, for console lines, to the console transcript.
+    fn run(&mut self, action: Action) {
+        match action {
+            Action::Undo => match command::undo(&mut self.engine) {
+                Ok(true) => log::info!("undo"),
+                Ok(false) => log::info!("nothing to undo"),
+                Err(err) => log::error!("{err:#}"),
+            },
+            Action::Redo => match command::redo(&mut self.engine) {
+                Ok(true) => log::info!("redo"),
+                Ok(false) => log::info!("nothing to redo"),
+                Err(err) => log::error!("{err:#}"),
+            },
+            Action::Console(line) => {
+                let reply = self.run_console_line(&line);
+                match &reply {
+                    Ok(text) => log::info!("{line} -> {text}"),
+                    Err(text) => log::error!("{line} -> {text}"),
+                }
+                self.console.record(line, reply);
+            }
+        }
+    }
+
+    /// Runs `<tool.name> [json args]` through the command history and
+    /// describes the result.
+    fn run_console_line(&mut self, line: &str) -> Result<String, String> {
+        let (tool, args) = ui::parse_console_line(line)?;
+        let output = command::apply(&self.registry, &mut self.engine, tool, args)
+            .map_err(|err| format!("{err:#}"))?;
+        Ok(match output {
+            ToolOutput::Text(text) => text,
+            ToolOutput::Json(value) => value.to_string(),
+            ToolOutput::Image { width, height, .. } => format!("<{width}x{height} PNG>"),
+        })
+    }
+
     /// Whether File > Quit was clicked.
     pub fn quit_requested(&self) -> bool {
         self.quit
     }
 }
 
-/// Makes the viewport target match the size the Viewport panel asked for:
-/// creates it on first use, recreates it when the panel was resized, and
-/// points the panel's egui texture id at its colour texture. Does nothing
-/// while the panel has no area (before its first layout, or collapsed).
-fn sync_viewport_target(
-    slot: &mut Option<ViewportTarget>,
+/// Makes the engine's offscreen target match the size the Viewport panel
+/// asked for and points the panel's egui texture id at its colour texture,
+/// re-registering it whenever the target was recreated. Does nothing while
+/// the panel has no area (before its first layout, or collapsed).
+fn sync_viewport_texture(
+    slot: &mut Option<ViewportTexture>,
     viewport: &mut Viewport,
+    engine: &mut Headless,
     renderer: &mut egui_wgpu::Renderer,
-    gpu: &GpuContext,
 ) {
     let [width, height] = viewport.size_px;
     if width == 0 || height == 0 {
         return;
     }
-    if slot
-        .as_ref()
-        .is_some_and(|v| (v.target.width, v.target.height) == (width, height))
-    {
+    if slot.as_ref().is_some_and(|v| v.size == [width, height]) {
         return;
     }
 
-    let target = OffscreenTarget::new(&gpu.device, width, height);
+    engine.resize(width, height);
+    let gpu = &engine.gpu;
     // egui samples textures as gamma-encoded bytes: view the sRGB colour
     // texture as plain Rgba8Unorm so the stored bytes reach egui unchanged.
-    let view = target.color.create_view(&wgpu::TextureViewDescriptor {
-        format: Some(OFFSCREEN_GAMMA_VIEW_FORMAT),
-        ..Default::default()
-    });
+    let view = engine
+        .target
+        .color
+        .create_view(&wgpu::TextureViewDescriptor {
+            format: Some(OFFSCREEN_GAMMA_VIEW_FORMAT),
+            ..Default::default()
+        });
     let filter = wgpu::FilterMode::Linear;
     let texture = match slot.take() {
         Some(old) => {
@@ -201,37 +262,10 @@ fn sync_viewport_target(
     };
     log::debug!("viewport target resized to {width}x{height}");
     viewport.texture = Some(texture);
-    *slot = Some(ViewportTarget { target, texture });
-}
-
-/// Clears `target` to [`scene::SKY`] and draws the world into it.
-fn render_scene(
-    world: &mut World,
-    resources: &mut Resources,
-    gpu: &GpuContext,
-    target: &OffscreenTarget,
-) {
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewport clear encoder"),
-        });
-    drop(begin_mesh_pass(
-        &mut encoder,
-        &target.color_view,
-        &target.depth_view,
-        scene::SKY,
-    ));
-    gpu.queue.submit([encoder.finish()]);
-    let aspect = target.width as f32 / target.height as f32;
-    render_world(
-        world,
-        resources,
-        gpu,
-        &target.color_view,
-        &target.depth_view,
-        aspect,
-    );
+    *slot = Some(ViewportTexture {
+        size: [width, height],
+        texture,
+    });
 }
 
 /// The window title for `project`.
@@ -387,4 +421,98 @@ pub fn screenshot(project_dir: &Path, out: &Path, log: LogBuffer) -> anyhow::Res
         .with_context(|| format!("writing {}", out.display()))?;
     log::info!("screenshot written to {}", out.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shin::project::{self, NewProjectOptions};
+
+    /// One frame at [`WINDOW_SIZE`] with `events` as the input.
+    fn frame(
+        core: &mut EditorCore,
+        gpu: &GpuContext,
+        target: &OffscreenTarget,
+        events: Vec<egui::Event>,
+    ) {
+        let [width, height] = WINDOW_SIZE;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width as f32, height as f32),
+            )),
+            events,
+            ..Default::default()
+        };
+        core.frame(
+            gpu,
+            input,
+            &target.color_view,
+            OFFSCREEN_COLOR_FORMAT,
+            WINDOW_SIZE,
+        );
+    }
+
+    /// Ctrl+Z (Cmd+Z on macOS), with `shift` for redo.
+    fn undo_key(shift: bool) -> egui::Event {
+        let mut modifiers = egui::Modifiers::COMMAND;
+        modifiers.shift = shift;
+        egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// The ticket's manual check, automated: `entity.spawn` from the console
+    /// adds an entity, Ctrl+Z removes it, Ctrl+Shift+Z brings it back.
+    #[test]
+    fn ctrl_z_undoes_a_console_spawn() -> anyhow::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("shin-editor-undo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_dir = root.join("demo");
+        project::create(&NewProjectOptions {
+            name: "demo".to_string(),
+            dir: project_dir.clone(),
+            engine: Default::default(),
+        })?;
+
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+        let starter = core.engine.world.len();
+
+        core.run(Action::Console(
+            r#"entity.spawn {"mesh": 0, "translation": [0, 2, 0]}"#.to_string(),
+        ));
+        assert!(
+            matches!(core.console.transcript.last(), Some((_, Ok(_)))),
+            "{:?}",
+            core.console.transcript
+        );
+        assert_eq!(core.engine.world.len(), starter + 1);
+
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert_eq!(core.engine.world.len(), starter, "Ctrl+Z removes it");
+
+        frame(&mut core, &gpu, &target, vec![undo_key(true)]);
+        assert_eq!(
+            core.engine.world.len(),
+            starter + 1,
+            "Ctrl+Shift+Z restores it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 }
