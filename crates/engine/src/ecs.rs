@@ -116,6 +116,30 @@ pub struct Time {
     pub alpha: f64,
 }
 
+impl Time {
+    /// Records one fixed step of `dt` seconds: sets `fixed_dt`, increments
+    /// `fixed_steps`, and adds `dt` to `elapsed`.
+    pub fn advance_fixed(&mut self, dt: f64) {
+        self.fixed_dt = dt;
+        self.fixed_steps += 1;
+        self.elapsed += dt;
+    }
+}
+
+/// Runs one fixed simulation step: advances the [`Time`] resource by `dt`
+/// (inserting a default `Time` first if it is missing), then runs the
+/// schedule's fixed systems, so step `k` sees `fixed_steps == k`.
+///
+/// This is the single fixed-step code path shared by
+/// [`crate::app::EcsGame`] and [`crate::headless::Headless`].
+pub fn fixed_step(world: &mut World, res: &mut Resources, schedule: &mut Schedule, dt: f64) {
+    if res.get::<Time>().is_none() {
+        res.insert(Time::default());
+    }
+    res.expect_mut::<Time>().advance_fixed(dt);
+    schedule.run_fixed(world, res);
+}
+
 /// A system: a plain function over the world and resources.
 pub type System = fn(&mut World, &mut Resources);
 
@@ -307,6 +331,16 @@ mod tests {
         // Time is advanced before the systems run, so step k sees k.
         let seen = game.resources.expect::<Vec<u64>>();
         assert_eq!(seen, &(1..=n).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn advance_fixed_counts_steps_and_time() {
+        let mut time = Time::default();
+        time.advance_fixed(0.5);
+        time.advance_fixed(0.25);
+        assert_eq!(time.fixed_steps, 2);
+        assert_eq!(time.fixed_dt, 0.25);
+        assert_eq!(time.elapsed, 0.75);
     }
 
     #[test]
