@@ -7,7 +7,7 @@
 //!
 //! [`EcsGame`] is a ready-made [`Game`] for applications that are "a world
 //! plus systems" (see [`crate::ecs`]). It keeps an
-//! [`InputState`](crate::input::InputState) resource up to date.
+//! [`InputState`] resource up to date.
 
 use std::sync::Arc;
 use std::time::Instant;

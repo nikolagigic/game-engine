@@ -213,9 +213,8 @@ pub fn fly_camera_system(_world: &mut World, res: &mut Resources) {
 
     let transform = &mut res.expect_mut::<Camera>().transform;
     transform.rotation = rotation;
-    let direction = transform.forward() * forward_input
-        + transform.right() * right_input
-        + Vec3::Y * up_input;
+    let direction =
+        transform.forward() * forward_input + transform.right() * right_input + Vec3::Y * up_input;
     // Normalised so diagonal movement is not faster than straight movement.
     transform.translation += direction.normalize_or_zero() * speed * dt;
 }
