@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+# Every dependency is pinned here. Crates use `{ workspace = true }`.
+# Do NOT add dependencies in a crate Cargo.toml without adding them here first.
+[workspace.dependencies]
+# Windowing & input
+winit = "0.30"
+# GPU
+wgpu = "30.0"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+# Math
+glam = { version = "0.34", features = ["bytemuck"] }
+# ECS
+hecs = "0.11"
+# Assets
+gltf = { version = "1.4", features = ["utils"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Milestone 2 (not yet used; pinned so adding them later is conflict-free)
+rhai = "1.26"
+rapier3d = "0.36"
+
+[profile.dev]
+opt-level = 1            # keep debug builds usable for a real-time loop
+
+[profile.dev.package."*"]
+opt-level = 3            # deps (wgpu, image) always optimized
+
+[profile.release]
+debug = 1                # keep symbols for profiling
