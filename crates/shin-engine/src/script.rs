@@ -13,15 +13,30 @@
 //!
 //! `entity` has `id`, `name`, and `transform` (with `translation`,
 //! `rotation`, and `scale`); `dt` is the fixed step in seconds; `time()` is
-//! the simulated seconds since play started. The full list of script types
-//! and functions is in [`bindings`]. Changes to `entity.transform` are
-//! written back to the entity after the call. Scripts cannot spawn
+//! the simulated seconds since play started. Changes to `entity.transform`
+//! are written back to the entity after the call. Scripts cannot spawn
 //! entities or call each other.
 //!
 //! Only `update` (and the functions it calls) runs; statements outside
 //! functions do not. Rhai functions cannot see outer variables, so keep
 //! settings as `let`s inside `update` or as helper functions
 //! (`fn speed() { 0.8 }`).
+//!
+//! # Script API
+//!
+//! On top of Rhai's standard library (`sin`, `cos`, `atan`, `PI()`, ...):
+//!
+//! - `Vec3`: `vec3(x, y, z)`, fields `x`, `y`, `z`, `+`, `-`, `* number`,
+//!   `length()`.
+//! - `Quat`: `quat_euler(x, y, z)` (radians, intrinsic X then Y then Z, as
+//!   the `entity.*` tools use), fields `x`, `y`, `z`, `w` (read-only),
+//!   `quat * quat`, `quat * vec3`.
+//! - `Transform`: fields `translation`, `rotation`, `scale`.
+//! - `Entity`: fields `id` and `name` (read-only) and `transform`.
+//! - `time()`: simulated seconds since play started.
+//!
+//! Numbers are `f64` in scripts and `f32` in the engine; vector setters
+//! also accept integers, so `v.y = 1` works.
 //!
 //! [`script_system`] runs the scripts. It runs only while the
 //! [`PlayState`] resource is playing and not paused; a world with no
@@ -144,7 +159,7 @@ impl Default for ScriptEngine {
 }
 
 impl ScriptEngine {
-    /// An engine with the script API ([`bindings`]) registered, no scripts
+    /// An engine with the [script API](self#script-api) registered, no scripts
     /// loaded, and [`DEFAULT_POLL_INTERVAL`]. `print` and `debug` in
     /// scripts go to the log.
     pub fn new() -> Self {
