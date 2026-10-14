@@ -5,6 +5,9 @@
 //! GPU context) with the project open, and a [`ToolRegistry`]; every edit
 //! (console line, scene panel, inspector, undo, redo) goes through the
 //! engine's command history ([`shin::command`], via [`crate::edit`]).
+//! Play and Stop (GE-024) use the engine's play mode
+//! ([`shin::headless::PlayState`]); while playing, a [`PlayClock`] steps the
+//! simulation every frame and edits are refused.
 //! It does one frame given egui input and an output view, so the
 //! same code serves the window ([`EditorApp`], a [`Game`] for
 //! [`shin::app::run`]) and `--screenshot` ([`screenshot`], which paints into
@@ -32,6 +35,7 @@ use crate::edit;
 use crate::inspector::{Edit, Inspector};
 use crate::log_sink::LogBuffer;
 use crate::orbit::OrbitCamera;
+use crate::play::{self, PlayClock};
 use crate::scene;
 use crate::ui::{self, Action, Console, EditorUi, Fields, Selection, Tab, Viewport};
 
@@ -72,6 +76,8 @@ pub struct EditorCore {
     /// The undo stack (`(tool, args)`) when the scene was last opened or
     /// saved; the scene is unsaved while the stack differs from it.
     saved: Vec<(String, Value)>,
+    /// Steps the simulation from frame times while playing (GE-024).
+    clock: PlayClock,
 }
 
 /// How much the selected entity's colour is mixed toward white in the
@@ -90,7 +96,9 @@ impl EditorCore {
         // The target is resized to the Viewport panel once it is laid out.
         let mut engine = Headless::from_gpu(gpu.clone(), 1, 1)?;
         let project = scene::open(&mut engine, project_dir)?;
+        let clock = PlayClock::new(engine.fixed_dt);
         Ok(Self {
+            clock,
             egui,
             renderer: None,
             dock: ui::default_layout(),
@@ -111,7 +119,16 @@ impl EditorCore {
         })
     }
 
-    /// Runs one editor frame: the UI pass on `input`, then the scene into
+    /// Adds [`play::orbit_demo`] to the engine's fixed systems, so Play
+    /// moves the entity named `moon` (`--demo-orbit`).
+    pub fn add_orbit_demo(&mut self) {
+        self.engine
+            .schedule
+            .add_fixed("orbit_demo", play::orbit_demo);
+    }
+
+    /// Runs one editor frame: the UI pass on `input`, the simulation steps
+    /// due while playing ([`PlayClock::tick`]), then the scene into
     /// the viewport target (resized to the panel first), then the UI painted
     /// over `output` (loaded, not cleared), whose size is `size_px` and
     /// colour format `format`. Returns what egui wants the platform to do
@@ -146,6 +163,7 @@ impl EditorCore {
         for action in actions {
             self.run(action);
         }
+        self.clock.tick(&mut self.engine);
 
         let renderer = self.renderer.get_or_insert_with(|| {
             egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default())
@@ -232,9 +250,24 @@ impl EditorCore {
 
     /// [`Self::run`], returning the error instead of logging it.
     fn try_run(&mut self, action: Action) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !(action.is_edit() && self.engine.play_state().is_playing()),
+            "editing is disabled while playing; press Stop first"
+        );
         let reg = &self.registry;
         let engine = &mut self.engine;
         match action {
+            Action::Play => {
+                engine.play()?;
+                self.clock.reset();
+            }
+            Action::Pause => {
+                engine.pause()?;
+            }
+            Action::Stop => {
+                engine.stop()?;
+                self.drop_dead_selection();
+            }
             Action::Undo => match command::undo(engine)? {
                 true => log::info!("undo"),
                 false => log::info!("nothing to undo"),
@@ -360,11 +393,20 @@ impl EditorCore {
     }
 
     /// Runs `<tool.name> [json args]` through the command history and
-    /// describes the result.
+    /// describes the result. While playing the history is frozen: the tool
+    /// runs without being recorded (Stop discards what it changed), and
+    /// `history.*` tools are refused.
     fn run_console_line(&mut self, line: &str) -> Result<String, String> {
         let (tool, args) = ui::parse_console_line(line)?;
-        let output = command::apply(&self.registry, &mut self.engine, tool, args)
-            .map_err(|err| format!("{err:#}"))?;
+        let output = if self.engine.play_state().is_playing() {
+            if tool.starts_with("history.") {
+                return Err("the history is frozen while playing; press Stop first".to_string());
+            }
+            self.registry.call(&mut self.engine, tool, args)
+        } else {
+            command::apply(&self.registry, &mut self.engine, tool, args)
+        }
+        .map_err(|err| format!("{err:#}"))?;
         Ok(match output {
             ToolOutput::Text(text) => text,
             ToolOutput::Json(value) => value.to_string(),
@@ -478,14 +520,18 @@ pub struct EditorApp {
     window: Option<Arc<Window>>,
     egui_winit: Option<egui_winit::State>,
     core: Option<EditorCore>,
+    /// Whether to register [`play::orbit_demo`] (`--demo-orbit`).
+    orbit_demo: bool,
 }
 
 impl EditorApp {
     /// An editor for the project in `project_dir`; the window, GPU, and
-    /// scene are created when [`shin::app::run`] starts it.
-    pub fn new(project_dir: &Path, log: LogBuffer) -> Self {
+    /// scene are created when [`shin::app::run`] starts it. With
+    /// `orbit_demo`, Play runs [`play::orbit_demo`].
+    pub fn new(project_dir: &Path, log: LogBuffer, orbit_demo: bool) -> Self {
         Self {
             project_dir: project_dir.to_path_buf(),
+            orbit_demo,
             log,
             egui: egui::Context::default(),
             window: None,
@@ -512,12 +558,12 @@ impl Game for EditorApp {
         if let Some(state) = &mut self.egui_winit {
             state.set_max_texture_side(ctx.device.limits().max_texture_dimension_2d as usize);
         }
-        self.core = Some(EditorCore::new(
-            ctx,
-            self.egui.clone(),
-            &self.project_dir,
-            self.log.clone(),
-        )?);
+        let mut core =
+            EditorCore::new(ctx, self.egui.clone(), &self.project_dir, self.log.clone())?;
+        if self.orbit_demo {
+            core.add_orbit_demo();
+        }
+        self.core = Some(core);
         Ok(())
     }
 
@@ -563,8 +609,8 @@ impl Game for EditorApp {
 }
 
 /// Opens the editor window on the project in `project_dir` and runs until
-/// it is closed.
-pub fn run(project_dir: &Path, log: LogBuffer) -> anyhow::Result<()> {
+/// it is closed. With `orbit_demo`, Play runs [`play::orbit_demo`].
+pub fn run(project_dir: &Path, log: LogBuffer, orbit_demo: bool) -> anyhow::Result<()> {
     let project = Project::load(project_dir)?;
     let config = AppConfig {
         title: title(&project),
@@ -572,7 +618,7 @@ pub fn run(project_dir: &Path, log: LogBuffer) -> anyhow::Result<()> {
         height: WINDOW_SIZE[1],
         ..Default::default()
     };
-    shin::app::run(config, EditorApp::new(project_dir, log))
+    shin::app::run(config, EditorApp::new(project_dir, log, orbit_demo))
 }
 
 /// Renders one full editor frame of the project in `project_dir` without a
@@ -984,6 +1030,151 @@ mod tests {
         frame(&mut core, &gpu, &target, vec![undo_key(false)]);
         assert!(core.engine.world.contains(cube), "and is undoable");
 
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// An editor on a fresh demo project with [`play::orbit_demo`] added,
+    /// after one frame; returns it with the GPU, target, and temp root.
+    fn play_editor(
+        label: &str,
+    ) -> anyhow::Result<(EditorCore, GpuContext, OffscreenTarget, std::path::PathBuf)> {
+        let (root, project_dir) = demo_project(label)?;
+        let gpu = GpuContext::new(None)?;
+        let mut core = EditorCore::new(
+            &gpu,
+            egui::Context::default(),
+            &project_dir,
+            LogBuffer::default(),
+        )?;
+        core.add_orbit_demo();
+        let [width, height] = WINDOW_SIZE;
+        let target = OffscreenTarget::new(&gpu.device, width, height);
+        frame(&mut core, &gpu, &target, Vec::new());
+        Ok((core, gpu, target, root))
+    }
+
+    /// The ticket's acceptance test: with an orbit demo system registered,
+    /// Play moves the moon and Stop restores its exact transform (and the
+    /// whole scene, entity ids, history, and saved state).
+    #[test]
+    fn play_moves_the_moon_and_stop_restores_it() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root) = play_editor("play-stop")?;
+        let moon = named(&core, play::ORBITER);
+        let before = *core.engine.world.get::<&Transform>(moon)?;
+        let scene_before =
+            shin::scene::SceneFile::capture(&core.engine.world, &core.engine.resources)?;
+        let list_before = entities(&mut core)?;
+        core.selection.0 = Some(moon);
+
+        core.try_run(Action::Play)?;
+        assert!(core.engine.play_state().is_playing());
+        // One second of frames: 60 fixed steps at 1/60 s.
+        for _ in 0..4 {
+            core.clock.advance(&mut core.engine, 0.25);
+        }
+        assert!((core.engine.play_time().unwrap() - 1.0).abs() < 1e-9);
+        let moved = core.engine.world.get::<&Transform>(moon)?.translation;
+        assert!(
+            moved.distance(before.translation) > 0.5,
+            "the moon moved from {} to {moved}",
+            before.translation
+        );
+        frame(&mut core, &gpu, &target, Vec::new());
+
+        core.try_run(Action::Stop)?;
+        assert!(!core.engine.play_state().is_playing());
+        assert_eq!(
+            *core.engine.world.get::<&Transform>(moon)?,
+            before,
+            "the moon is back, exactly, under the same id"
+        );
+        assert_eq!(
+            shin::scene::SceneFile::capture(&core.engine.world, &core.engine.resources)?,
+            scene_before
+        );
+        assert_eq!(entities(&mut core)?, list_before);
+        assert_eq!(core.selection.0, Some(moon), "the selection survives");
+        assert!(!core.is_dirty(), "playing is not an edit");
+        assert!(
+            core.engine
+                .resources
+                .get::<History>()
+                .is_none_or(|h| h.undo_len() == 0),
+            "nothing recorded"
+        );
+
+        // Not playing: frames do not step.
+        assert_eq!(core.clock.advance(&mut core.engine, 1.0), 0);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// While playing, edit actions, undo, Delete, and recorded console
+    /// edits are refused; pause stops stepping; console `sim.*` drives
+    /// the same mode as the toolbar.
+    #[test]
+    fn play_disables_editing() -> anyhow::Result<()> {
+        let (mut core, gpu, target, root) = play_editor("play-disabled")?;
+        let cube = named(&core, "cube");
+        core.try_run(Action::Despawn(named(&core, "ground")))?;
+        assert_eq!(core.engine.resources.expect::<History>().undo_len(), 1);
+        let starter = core.engine.world.len();
+
+        core.run(Action::Console("sim.play".to_string()));
+        assert!(core.engine.play_state().is_playing(), "console sim.play");
+        for action in [
+            Action::Spawn("builtin://cube".to_string()),
+            Action::Despawn(cube),
+            Action::Edit(Edit::Name(cube, "box".to_string())),
+            Action::Undo,
+            Action::Redo,
+            Action::Save,
+            Action::Open,
+        ] {
+            let err = core.try_run(action.clone()).expect_err("refused");
+            assert!(
+                err.to_string().contains("while playing"),
+                "{action:?}: {err}"
+            );
+        }
+        core.selection.0 = Some(cube);
+        frame(&mut core, &gpu, &target, vec![key(egui::Key::Delete)]);
+        frame(&mut core, &gpu, &target, vec![undo_key(false)]);
+        assert!(core.engine.world.contains(cube), "Delete is ignored");
+        assert_eq!(core.engine.world.len(), starter, "Ctrl+Z is ignored");
+
+        core.run(Action::Console("history.undo".to_string()));
+        assert!(
+            matches!(core.console.transcript.last(), Some((_, Err(e))) if e.contains("frozen"))
+        );
+        core.run(Action::Console(
+            r#"entity.spawn {"mesh": 0, "translation": [0, 3, 0]}"#.to_string(),
+        ));
+        assert_eq!(core.engine.world.len(), starter + 1, "console still works");
+        assert_eq!(
+            core.engine.resources.expect::<History>().undo_len(),
+            1,
+            "but is not recorded"
+        );
+
+        core.try_run(Action::Pause)?;
+        assert_eq!(core.clock.advance(&mut core.engine, 1.0), 0, "paused");
+        core.try_run(Action::Pause)?;
+        assert_eq!(core.clock.advance(&mut core.engine, 0.25), 15, "resumed");
+
+        core.try_run(Action::Stop)?;
+        assert_eq!(
+            core.engine.world.len(),
+            starter,
+            "the console spawn is gone"
+        );
+        core.try_run(Action::Undo)?;
+        assert_eq!(
+            core.engine.world.len(),
+            starter + 1,
+            "the history picks up where it was: the ground comes back"
+        );
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }

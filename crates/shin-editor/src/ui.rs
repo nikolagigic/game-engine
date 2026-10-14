@@ -11,6 +11,12 @@
 //! Keys, while no text field is being typed in: Ctrl+Z (Cmd+Z on macOS)
 //! undoes and Ctrl+Shift+Z redoes (also in an empty console), Delete or
 //! Backspace deletes the selected entity, and Escape clears the selection.
+//!
+//! The menu bar ends in the play toolbar (GE-024): Play, Pause, Stop, and
+//! the simulated time. While playing, editing is disabled: the Inspector,
+//! the Scene panel's add and delete controls, undo and redo, the Delete
+//! key, and File > Open and Save are greyed out or ignored (entities can
+//! still be selected).
 
 use egui::{
     Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, TextureId, Ui,
@@ -94,6 +100,23 @@ pub enum Action {
     /// File > Save As: save to this project-relative path and make it the
     /// current one.
     SaveAs(String),
+    /// Toolbar Play: snapshot the scene and start (or resume) playing.
+    Play,
+    /// Toolbar Pause: toggle pause while playing.
+    Pause,
+    /// Toolbar Stop: restore the scene from the play snapshot.
+    Stop,
+}
+
+impl Action {
+    /// Whether this action edits the scene or its history, which is not
+    /// allowed while playing. Console lines and the toolbar are allowed.
+    pub fn is_edit(&self) -> bool {
+        !matches!(
+            self,
+            Self::Console(_) | Self::Play | Self::Pause | Self::Stop
+        )
+    }
 }
 
 /// The Console panel's state: the line being typed and past lines with
@@ -210,9 +233,10 @@ impl EditorUi<'_> {
     /// Draws the whole editor into `ui`, which covers the window.
     pub fn show(&mut self, ui: &mut Ui, dock: &mut DockState<Tab>) {
         self.shortcuts(ui);
+        let editing = !self.engine.play_state().is_playing();
         let history = self.engine.resources.get::<History>();
-        let can_undo = history.is_some_and(|h| h.undo_len() > 0);
-        let can_redo = history.is_some_and(|h| h.redo_len() > 0);
+        let can_undo = editing && history.is_some_and(|h| h.undo_len() > 0);
+        let can_redo = editing && history.is_some_and(|h| h.redo_len() > 0);
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| self.file_menu(ui));
@@ -229,6 +253,8 @@ impl EditorUi<'_> {
                     }
                 });
                 ui.menu_button("View", |ui| view_menu(ui, dock));
+                ui.separator();
+                self.toolbar(ui);
             });
         });
         egui::CentralPanel::default()
@@ -243,10 +269,45 @@ impl EditorUi<'_> {
             });
     }
 
-    /// File > Open, Save, Save As, Quit.
-    fn file_menu(&mut self, ui: &mut Ui) {
+    /// Play, Pause (highlighted while paused; click again to resume), Stop,
+    /// and the simulated seconds since Play.
+    fn toolbar(&mut self, ui: &mut Ui) {
+        let state = self.engine.play_state();
+        let (playing, paused) = (state.is_playing(), state.is_paused());
+        let play = egui::Button::new("Play").selected(playing && !paused);
         if ui
-            .button("Open")
+            .add_enabled(!playing || paused, play)
+            .on_hover_text("Run the simulation; Stop puts the scene back")
+            .clicked()
+        {
+            self.actions.push(Action::Play);
+        }
+        let pause = egui::Button::new("Pause").selected(paused);
+        if ui
+            .add_enabled(playing, pause)
+            .on_hover_text("Suspend or resume stepping")
+            .clicked()
+        {
+            self.actions.push(Action::Pause);
+        }
+        if ui
+            .add_enabled(playing, egui::Button::new("Stop"))
+            .on_hover_text("Restore the scene as it was at Play")
+            .clicked()
+        {
+            self.actions.push(Action::Stop);
+        }
+        let time = self.engine.play_time().unwrap_or(0.0);
+        ui.label(egui::RichText::new(format!("{time:.2} s")).monospace())
+            .on_hover_text("Simulated time since Play");
+    }
+
+    /// File > Open, Save, Save As, Quit. All but Quit are disabled while
+    /// playing.
+    fn file_menu(&mut self, ui: &mut Ui) {
+        let editing = !self.engine.play_state().is_playing();
+        if ui
+            .add_enabled(editing, egui::Button::new("Open"))
             .on_hover_text("Load the project's entry scene")
             .clicked()
         {
@@ -254,13 +315,22 @@ impl EditorUi<'_> {
             ui.close();
         }
         if ui
-            .button("Save")
+            .add_enabled(editing, egui::Button::new("Save"))
             .on_hover_text(format!("Save to {}", self.scene_path))
             .clicked()
         {
             self.actions.push(Action::Save);
             ui.close();
         }
+        ui.add_enabled_ui(editing, |ui| self.save_as_row(ui));
+        ui.separator();
+        if ui.button("Quit").clicked() {
+            *self.quit = true;
+        }
+    }
+
+    /// File > Save As: a path field and its button.
+    fn save_as_row(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.fields.save_as)
@@ -274,19 +344,21 @@ impl EditorUi<'_> {
                 ui.close();
             }
         });
-        ui.separator();
-        if ui.button("Quit").clicked() {
-            *self.quit = true;
-        }
     }
 
     /// Keyboard shortcuts. Undo and redo are left to the text field while
     /// one has focus and holds text, so typing in the console keeps its own
     /// text undo; in an empty console (right after running a line) they
     /// undo and redo edits. Delete and Escape act only when no text field
-    /// has focus.
+    /// has focus. While playing only Escape acts.
     fn shortcuts(&mut self, ui: &mut Ui) {
         let typing = ui.ctx().egui_wants_keyboard_input();
+        if self.engine.play_state().is_playing() {
+            if !typing && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.selection.0 = None;
+            }
+            return;
+        }
         if !typing {
             if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.selection.0 = None;
@@ -342,8 +414,17 @@ impl EditorUi<'_> {
     }
 
     /// Add and Delete buttons above the list of entities that have a
-    /// transform, in id order; clicking one selects it.
+    /// transform, in id order; clicking one selects it. The buttons are
+    /// disabled while playing; selecting still works.
     fn scene_ui(&mut self, ui: &mut Ui) {
+        let editing = !self.engine.play_state().is_playing();
+        ui.add_enabled_ui(editing, |ui| self.scene_controls(ui));
+        ui.separator();
+        self.entity_list(ui);
+    }
+
+    /// The Scene panel's add and delete controls.
+    fn scene_controls(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             for (label, source) in ADD_BUTTONS {
                 if ui.button(label).clicked() {
@@ -371,8 +452,11 @@ impl EditorUi<'_> {
                 self.actions.push(Action::Spawn(source));
             }
         });
-        ui.separator();
+    }
 
+    /// The entities that have a transform, in id order; clicking one
+    /// selects it.
+    fn entity_list(&mut self, ui: &mut Ui) {
         let mut rows: Vec<(Entity, String)> = self
             .engine
             .world
@@ -477,8 +561,12 @@ impl TabViewer for EditorUi<'_> {
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Scene => self.scene_ui(ui),
             Tab::Inspector => {
-                self.inspector
-                    .ui(ui, self.engine, self.selection.0, self.actions);
+                // Read-only while playing: it still shows the live values.
+                let editing = !self.engine.play_state().is_playing();
+                ui.add_enabled_ui(editing, |ui| {
+                    self.inspector
+                        .ui(ui, self.engine, self.selection.0, self.actions);
+                });
             }
             Tab::Log => self.log_ui(ui),
             Tab::History => self.history_ui(ui),

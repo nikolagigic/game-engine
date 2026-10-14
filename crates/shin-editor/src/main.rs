@@ -1,21 +1,27 @@
 //! `shin-editor`, the Shin editor: an egui shell around a live viewport.
 //!
 //! ```text
-//! shin-editor <project-dir> [--screenshot <png>]
+//! shin-editor <project-dir> [--screenshot <png>] [--demo-orbit]
 //! ```
 //!
 //! Opens the project in `<project-dir>` (its `shin.toml` names the window)
 //! with docked Viewport, Scene, Inspector, and Log panels. In the viewport,
-//! left-drag orbits, right-drag pans, and the wheel zooms.
+//! left-drag orbits, right-drag pans, and the wheel zooms. The toolbar's
+//! Play runs the simulation and Stop puts the scene back.
 //!
 //! `--screenshot <png>` renders one full editor frame without a window,
 //! writes it to `<png>`, and exits; tests use it.
+//!
+//! `--demo-orbit` registers a demo system that moves the entity named
+//! `moon` around the origin while playing, as the starter game does, since
+//! the editor does not run the game's own systems yet.
 
 mod edit;
 mod editor;
 mod inspector;
 mod log_sink;
 mod orbit;
+mod play;
 mod scene;
 mod ui;
 
@@ -34,6 +40,10 @@ struct Cli {
     /// Render one editor frame offscreen to this PNG and exit.
     #[arg(long, value_name = "PNG")]
     screenshot: Option<PathBuf>,
+    /// Register a demo system that orbits the entity named `moon` while
+    /// playing.
+    #[arg(long)]
+    demo_orbit: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,6 +53,6 @@ fn main() -> anyhow::Result<()> {
 
     match cli.screenshot {
         Some(out) => editor::screenshot(&cli.project_dir, &out, log),
-        None => editor::run(&cli.project_dir, log),
+        None => editor::run(&cli.project_dir, log, cli.demo_orbit),
     }
 }

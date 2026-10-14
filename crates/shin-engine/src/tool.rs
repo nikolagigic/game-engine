@@ -300,7 +300,7 @@ impl ToolRegistry {
     /// (`project.new`), and scene files (`scene.save`, `scene.load`). This
     /// is the registry
     /// `shin-mcp` serves. History (`history.undo`, `history.redo`) is
-    /// included too.
+    /// included too, and play mode (`sim.play`, `sim.pause`, `sim.stop`).
     pub fn with_engine_tools() -> Self {
         let mut registry = Self::with_builtins();
         crate::asset::register_tools(&mut registry);
@@ -310,6 +310,7 @@ impl ToolRegistry {
         crate::project::register_tools(&mut registry);
         crate::scene::register_tools(&mut registry);
         crate::command::register_tools(&mut registry);
+        crate::headless::register_tools(&mut registry);
         registry
     }
 

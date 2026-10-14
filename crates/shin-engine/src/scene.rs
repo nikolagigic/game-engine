@@ -314,8 +314,10 @@ pub fn load(
     apply(world, res, device, queue, &scene)
 }
 
-/// [`load`] for an already parsed scene.
-fn apply(
+/// [`load`] for an already parsed scene, for example one captured in
+/// memory with [`SceneFile::capture`] (GE-024 restores play-mode snapshots
+/// this way). Same validation and errors as [`load`].
+pub fn apply(
     world: &mut World,
     res: &mut Resources,
     device: &wgpu::Device,
