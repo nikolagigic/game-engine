@@ -14,8 +14,9 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 
 ## Roles
 
-- **CEO / Product owner**: sets direction, merges PRs.
-- **Tech lead**: writes tickets, reviews PRs, owns architecture decisions.
+- **CEO / Product owner**: sets direction, pushes `main`.
+- **Tech lead**: writes tickets, reviews branches locally, merges approved
+  work into `main`, owns architecture decisions.
 - **Developers (you)**: implement exactly one ticket per PR, in a worktree.
 
 ## Architecture decisions (summary of the ADRs)
@@ -78,23 +79,29 @@ explicitly asks for a public type.
   needed, stop and say so in the PR rather than adding it.
 - GPU data structs are `#[repr(C)] #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]`.
 - Coordinate system: right-handed, +Y up, -Z forward (glTF convention).
+- Colour: `wgpu::Color`, clear colours, material factors, and shader
+  outputs are **linear** RGB. Surfaces and offscreen targets are sRGB
+  formats, so the hardware encodes on write. To show a known sRGB colour,
+  convert it to linear first (cornflower blue `#6495ED` is linear
+  `(0.127, 0.301, 0.846)`).
+- Projections: glam 0.34 moved them off `Mat4`. Use
+  `glam::camera::rh::proj::directx` (right-handed, +Y up NDC, depth 0..1,
+  which is wgpu's convention), already wrapped by `math::Camera`.
 - Tests: unit tests in-module under `#[cfg(test)]`; integration and golden
   tests in `crates/engine/tests/`. Every ticket says which test command
   proves its acceptance criteria.
 - Examples are the manual smoke test. Each rendering ticket adds or updates
   one example under `crates/engine/examples/`.
 
-## Build cache (important for parallel worktrees)
+## Build directory (important for parallel worktrees)
 
-Each worktree would otherwise rebuild wgpu from scratch. Before building,
-export a shared target directory:
-
-```sh
-export CARGO_TARGET_DIR="$HOME/.cache/game-engine/target"
-```
-
-Cargo locks the directory, so concurrent builds serialise safely but share
-artifacts.
+Do **not** share a `CARGO_TARGET_DIR` between worktrees, and do not set
+that variable at all. Cargo judges freshness by file timestamps, so a
+shared target directory hands a checkout whose files are older than the
+last build a stale library, and tests then pass or fail against the wrong
+code. Each worktree uses its own `target/` (gitignored). The first build in
+a fresh worktree compiles the dependencies once, about a minute; after that
+builds are incremental.
 
 ## Workflow
 
@@ -107,9 +114,11 @@ artifacts.
    **Out of scope** turns out to be required, stop and report it; do not
    expand the ticket.
 4. Run the ticket's test command and the full definition of done.
-5. Commit with a message starting `GE-NNN: ` and open a PR against `main`
-   whose description lists each acceptance criterion with a checkbox and how
-   you verified it.
+5. Commit with messages starting `GE-NNN: `. Do not push and do not use
+   `gh`. Send the tech lead a review request (ticket ID, branch, HEAD SHA,
+   each acceptance criterion with its evidence, design decisions, anything
+   unverified). The tech lead reviews the worktree branch locally, may send
+   change requests, and merges approved branches into `main`.
 
 ## Definition of done (every ticket, no exceptions)
 
@@ -121,7 +130,7 @@ artifacts.
 - [ ] New public items have a doc comment.
 - [ ] If the ticket adds a user-facing capability and GE-013 is merged: a
       tool is registered for it and tested through `ToolRegistry::call`.
-- [ ] PR opened against `main`, description maps AC to evidence.
+- [ ] Review request sent to the tech lead mapping each AC to evidence.
 
 ## T-shirt sizing (for reference)
 
