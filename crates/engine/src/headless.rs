@@ -10,7 +10,9 @@ use anyhow::Context as _;
 
 use crate::app::RenderFn;
 use crate::ecs::{self, Resources, Schedule, Time, World};
-use crate::gpu::{GpuContext, OffscreenTarget};
+use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
+use crate::math::{Camera, Projection, Transform, Vec3};
+use crate::render::{LightUniform, RenderState, render_world};
 use crate::stats::{FrameStats, frame_stats_system};
 
 /// A window-less engine: everything [`crate::app::EcsGame`] has, plus a GPU
@@ -32,16 +34,21 @@ pub struct Headless {
     /// Default black.
     pub clear_color: wgpu::Color,
     /// Optional drawing callback, called by [`Self::render`] after the
-    /// clear with the target's colour and depth views. GE-015 installs the renderer
-    /// here; with none installed a render is just the clear.
+    /// clear with the target's colour and depth views. [`Self::new`]
+    /// installs one that calls [`render_world`]; with none installed a
+    /// render is just the clear.
     pub render_fn: Option<RenderFn>,
 }
 
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
-    /// offscreen target, with an empty world, default [`Time`] and
-    /// [`FrameStats`] resources, and a schedule holding only
+    /// offscreen target, with an empty world and a schedule holding only
     /// [`frame_stats_system`].
+    ///
+    /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
+    /// [`default_light`]; and [`default_camera`]. [`Self::render_fn`]
+    /// draws the world with [`render_world`], so spawning an entity with a
+    /// `Transform` and a `MeshInstance` is enough to see it.
     ///
     /// Fails if no GPU adapter is available or a dimension is zero.
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
@@ -56,6 +63,15 @@ impl Headless {
         resources.insert(FrameStats::default());
         let mut schedule = Schedule::new();
         schedule.add_frame("frame_stats", frame_stats_system);
+        let mut render_state = RenderState::new(&gpu.device, OFFSCREEN_COLOR_FORMAT);
+        render_state.light = default_light();
+        resources.insert(render_state);
+        resources.insert(default_camera());
+        let render_fn: RenderFn = Box::new(|world, res, ctx, color, depth| {
+            let size = color.texture().size();
+            let aspect = size.width as f32 / size.height as f32;
+            render_world(world, res, ctx, color, depth, aspect);
+        });
         Ok(Self {
             gpu,
             world: World::new(),
@@ -64,7 +80,7 @@ impl Headless {
             target,
             fixed_dt: 1.0 / 60.0,
             clear_color: wgpu::Color::BLACK,
-            render_fn: None,
+            render_fn: Some(render_fn),
         })
     }
 
@@ -164,6 +180,32 @@ impl Headless {
             multiview_mask: None,
         });
         self.gpu.queue.submit([encoder.finish()]);
+    }
+}
+
+/// The camera [`Headless::new`] installs: at `(0, 2, 5)` looking at the
+/// origin, 45° vertical field of view, clip planes 0.1..100.
+pub fn default_camera() -> Camera {
+    let mut transform = Transform::from_translation(Vec3::new(0.0, 2.0, 5.0));
+    transform.looking_at(Vec3::ZERO, Vec3::Y);
+    Camera {
+        transform,
+        projection: Projection::Perspective {
+            fov_y_radians: 45f32.to_radians(),
+            near: 0.1,
+            far: 100.0,
+        },
+    }
+}
+
+/// The light [`Headless::new`] installs: white, travelling along
+/// `(1, -2, -1)` (from above, front-left of the default camera), with 0.1
+/// ambient. The same light the golden tests use.
+pub fn default_light() -> LightUniform {
+    LightUniform {
+        direction: [1.0, -2.0, -1.0, 0.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+        ambient: [0.1, 0.1, 0.1, 1.0],
     }
 }
 
