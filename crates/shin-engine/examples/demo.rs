@@ -136,10 +136,11 @@ pub fn setup(
     world: &mut World,
     res: &mut Resources,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
     gltf_cube: &MeshData,
 ) {
-    let mut state = RenderState::new(device, format);
+    let mut state = RenderState::new(device, queue, format);
     state.light = LightUniform {
         direction: [-0.6, -1.0, -0.4, 0.0],
         color: [1.0, 0.95, 0.85, 1.0],
@@ -161,6 +162,7 @@ pub fn setup(
         MeshInstance {
             mesh: loaded,
             color: [0.18, 0.2, 0.17, 1.0],
+            texture: None,
         },
     ));
 
@@ -191,7 +193,12 @@ pub fn setup(
                         Transform::from_trs(t, Quat::IDENTITY, Vec3::splat(r)),
                     )
                 };
-                (transform, MeshInstance { mesh, color })
+                let instance = MeshInstance {
+                    mesh,
+                    color,
+                    texture: None,
+                };
+                (transform, instance)
             }),
     );
 
@@ -205,6 +212,7 @@ pub fn setup(
         MeshInstance {
             mesh: loaded,
             color: [0.9, 0.9, 0.9, 1.0],
+            texture: None,
         },
     ));
 
@@ -221,6 +229,7 @@ pub fn setup(
         let mesh = MeshInstance {
             mesh: sphere,
             color: [1.0, 0.75, 0.2, 1.0],
+            texture: None,
         };
         (transform, mesh, orbit)
     }));
@@ -294,7 +303,14 @@ fn main() -> anyhow::Result<()> {
     game.render_fn = Some(Box::new(move |world, res, ctx, color, depth| {
         let texture = color.texture();
         if res.get::<RenderState>().is_none() {
-            setup(world, res, &ctx.device, texture.format(), &gltf_cube);
+            setup(
+                world,
+                res,
+                &ctx.device,
+                &ctx.queue,
+                texture.format(),
+                &gltf_cube,
+            );
         }
         let aspect = texture.width() as f32 / texture.height() as f32;
         render_world(world, res, ctx, color, depth, aspect);

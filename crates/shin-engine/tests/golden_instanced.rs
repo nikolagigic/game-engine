@@ -83,7 +83,11 @@ fn grid_scene() -> anyhow::Result<Scene> {
     let mut engine = Headless::new(SIZE, SIZE)?;
     engine.clear_color = CLEAR;
 
-    let mut state = RenderState::new(&engine.gpu.device, OFFSCREEN_COLOR_FORMAT);
+    let mut state = RenderState::new(
+        &engine.gpu.device,
+        &engine.gpu.queue,
+        OFFSCREEN_COLOR_FORMAT,
+    );
     state.light = LightUniform {
         direction: [1.0, -2.0, -1.0, 0.0],
         color: [1.0, 1.0, 1.0, 1.0],
@@ -105,7 +109,11 @@ fn grid_scene() -> anyhow::Result<Scene> {
                     let color = if (i + j) % 2 == 0 { ORANGE } else { BLUE };
                     engine.world.spawn((
                         Transform::from_translation(cube_position(i, j)),
-                        MeshInstance { mesh: cube, color },
+                        MeshInstance {
+                            mesh: cube,
+                            color,
+                            texture: None,
+                        },
                     ))
                 })
                 .collect()
@@ -191,6 +199,7 @@ fn second_mesh_adds_one_draw_call_and_both_appear() -> anyhow::Result<()> {
         MeshInstance {
             mesh: sphere,
             color: GREEN,
+            texture: None,
         },
     ));
 

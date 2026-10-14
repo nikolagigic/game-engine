@@ -67,7 +67,7 @@ fn finish_after_duration(_: &mut World, res: &mut Resources) {
 /// First frame only: builds the [`RenderState`] for the surface format and
 /// spawns the cubes in a square grid centred on the origin.
 fn setup(world: &mut World, res: &mut Resources, ctx: &GpuContext, format: wgpu::TextureFormat) {
-    let mut state = RenderState::new(&ctx.device, format);
+    let mut state = RenderState::new(&ctx.device, &ctx.queue, format);
     state.light = LightUniform {
         direction: [1.0, -2.0, -1.0, 0.0],
         color: [1.0, 1.0, 1.0, 1.0],
@@ -89,7 +89,11 @@ fn setup(world: &mut World, res: &mut Resources, ctx: &GpuContext, format: wgpu:
         let color = if (i + j) % 2 == 0 { ORANGE } else { BLUE };
         (
             Transform::from_translation(position),
-            MeshInstance { mesh: cube, color },
+            MeshInstance {
+                mesh: cube,
+                color,
+                texture: None,
+            },
         )
     }));
     log::info!("spawned {count} cubes");

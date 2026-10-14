@@ -1,8 +1,9 @@
-//! Asset tools (GE-015, GE-019): `asset.load`, `scene.load_gltf`, and
-//! `mesh.builtin`. All three resolve [`AssetSource`]s through the [`Assets`]
-//! resource, which uploads each source once into the renderer's
-//! [`MeshRegistry`].
+//! Asset tools (GE-015, GE-019, GE-025): `asset.load`, `scene.load_gltf`,
+//! and `mesh.builtin`. All three resolve [`AssetSource`]s through the
+//! [`Assets`] resource, which uploads each source once into the renderer's
+//! [`crate::render::MeshRegistry`] or [`crate::render::TextureRegistry`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -12,23 +13,28 @@ use serde_json::json;
 
 use super::registry::sphere_name;
 use super::{AssetSource, Assets};
+use crate::gpu::GpuContext;
 use crate::headless::Headless;
-use crate::render::{MeshInstance, MeshRegistry, RenderState};
+use crate::render::{MeshInstance, RenderState};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers `asset.load`, `scene.load_gltf`, and `mesh.builtin`.
 pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "asset.load",
-        "Uploads the mesh named by an asset source and returns its handle for \
-         entity.spawn. Loading the same source again returns the same handle.",
+        "Uploads the mesh or texture named by an asset source. A mesh returns \
+         {\"handle\": n} and a texture (PNG/JPEG file or glTF image) returns \
+         {\"texture\": n}; pass them to entity.spawn as `mesh` and `texture`. Loading \
+         the same source again returns the same handle.",
         asset_load,
     ));
     reg.register(TypedTool::new(
         "scene.load_gltf",
-        "Loads a glTF 2.0 file (.gltf or .glb), uploads its meshes, and spawns one \
-         entity per node with a mesh, at the node's world transform and tinted by its \
-         material's base colour. Returns the new mesh handles and entity ids.",
+        "Loads a glTF 2.0 file (.gltf or .glb), uploads its meshes and base-colour \
+         textures, and spawns one entity per node with a mesh, at the node's world \
+         transform, tinted by its material's base colour and textured by its \
+         base-colour texture. Returns the new mesh handles, texture handles (one per \
+         glTF image used as a base colour), and entity ids.",
         load_gltf,
     ));
     reg.register(TypedTool::new(
@@ -39,14 +45,14 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     ));
 }
 
-/// Runs `f` with the [`Assets`] resource, the GPU device, and the mesh
-/// registry borrowed together.
+/// Runs `f` with the [`Assets`] resource, the GPU context, and the
+/// [`RenderState`] (mesh and texture registries) borrowed together.
 ///
 /// [`crate::ecs::Resources`] hands out one mutable borrow at a time, so the
 /// `Assets` value is moved out for the call and put back afterwards.
 fn with_assets<R>(
     engine: &mut Headless,
-    f: impl FnOnce(&mut Assets, &wgpu::Device, &mut MeshRegistry) -> R,
+    f: impl FnOnce(&mut Assets, &GpuContext, &mut RenderState) -> R,
 ) -> anyhow::Result<R> {
     let slot = engine
         .resources
@@ -54,7 +60,7 @@ fn with_assets<R>(
         .context("no Assets resource")?;
     let mut assets = std::mem::replace(slot, Assets::new(PathBuf::new()));
     let result = match engine.resources.get_mut::<RenderState>() {
-        Some(state) => Ok(f(&mut assets, &engine.gpu.device, &mut state.registry)),
+        Some(state) => Ok(f(&mut assets, &engine.gpu, state)),
         None => Err(anyhow::anyhow!("no RenderState resource")),
     };
     engine.resources.insert(assets);
@@ -65,18 +71,26 @@ fn with_assets<R>(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AssetLoadArgs {
-    /// Asset source: "builtin://cube", "builtin://sphere" (32x16),
+    /// Asset source. Meshes: "builtin://cube", "builtin://sphere" (32x16),
     /// "builtin://sphere-<segments>x<rings>", or a glTF path with an optional
     /// triangle-primitive index, e.g. "assets/x.gltf" or "assets/x.gltf#2".
-    /// Relative paths are resolved against the project directory (the
-    /// engine's working directory).
+    /// Textures: a .png/.jpg/.jpeg path, e.g. "assets/checker.png", or a
+    /// glTF image, e.g. "assets/x.gltf#image=0". Relative paths are
+    /// resolved against the project directory (the engine's working
+    /// directory).
     source: String,
 }
 
 fn asset_load(engine: &mut Headless, args: AssetLoadArgs) -> anyhow::Result<ToolOutput> {
     let source = AssetSource::parse(&args.source)?;
-    let handle = with_assets(engine, |assets, device, registry| {
-        assets.mesh(device, registry, &source)
+    if source.is_texture() {
+        let texture = with_assets(engine, |assets, gpu, state| {
+            assets.texture(&gpu.device, &gpu.queue, &mut state.textures, &source)
+        })??;
+        return Ok(ToolOutput::Json(json!({ "texture": texture.0 })));
+    }
+    let handle = with_assets(engine, |assets, gpu, state| {
+        assets.mesh(&gpu.device, &mut state.registry, &source)
     })??;
     Ok(ToolOutput::Json(json!({ "handle": handle.0 })))
 }
@@ -91,7 +105,8 @@ struct LoadGltfArgs {
 }
 
 /// `scene.load_gltf` reads the file once and caches each triangle primitive
-/// under its own `path#index` source, so it shares meshes with `asset.load`.
+/// under its own `path#index` source and each base-colour image under
+/// `path#image=index`, so it shares meshes and textures with `asset.load`.
 fn load_gltf(engine: &mut Headless, args: LoadGltfArgs) -> anyhow::Result<ToolOutput> {
     let path = PathBuf::from(&args.path);
     let resolved = engine
@@ -100,8 +115,19 @@ fn load_gltf(engine: &mut Headless, args: LoadGltfArgs) -> anyhow::Result<ToolOu
         .context("no Assets resource")?
         .resolve(&path);
     let scene = super::load_gltf(resolved)?;
-    let handles = with_assets(engine, |assets, device, registry| {
-        scene
+
+    // Base-colour image index of each mesh's material, if it has one.
+    let mesh_images: Vec<Option<usize>> = scene
+        .meshes
+        .iter()
+        .map(|mesh| {
+            let material = scene.materials.get(mesh.material?)?;
+            material.base_color_texture
+        })
+        .collect();
+
+    let (handles, textures) = with_assets(engine, |assets, gpu, state| {
+        let handles: Vec<_> = scene
             .meshes
             .iter()
             .enumerate()
@@ -110,10 +136,34 @@ fn load_gltf(engine: &mut Headless, args: LoadGltfArgs) -> anyhow::Result<ToolOu
                     path: path.clone(),
                     index,
                 };
-                assets.mesh_from_data(device, registry, &source, mesh)
+                assets.mesh_from_data(&gpu.device, &mut state.registry, &source, mesh)
             })
-            .collect::<Vec<_>>()
-    })?;
+            .collect();
+        // glTF image index -> texture handle, uploading each image once.
+        let mut textures = HashMap::new();
+        for &index in mesh_images.iter().flatten() {
+            if textures.contains_key(&index) {
+                continue;
+            }
+            let image = scene
+                .images
+                .get(index)
+                .with_context(|| format!("{} has no image {index}", path.display()))?;
+            let source = AssetSource::GltfImage {
+                path: path.clone(),
+                index,
+            };
+            let handle = assets.texture_from_data(
+                &gpu.device,
+                &gpu.queue,
+                &mut state.textures,
+                &source,
+                image,
+            )?;
+            textures.insert(index, handle);
+        }
+        anyhow::Ok((handles, textures))
+    })??;
 
     let mut entities = Vec::new();
     for node in &scene.nodes {
@@ -123,15 +173,25 @@ fn load_gltf(engine: &mut Headless, args: LoadGltfArgs) -> anyhow::Result<ToolOu
             .and_then(|m| scene.materials.get(m))
             .map_or([1.0; 4], |m| m.base_color);
         let mesh = handles[index];
-        let entity = engine
-            .world
-            .spawn((node.transform, MeshInstance { mesh, color }));
+        let texture = mesh_images[index].map(|image| textures[&image]);
+        let entity = engine.world.spawn((
+            node.transform,
+            MeshInstance {
+                mesh,
+                color,
+                texture,
+            },
+        ));
         entities.push(entity.to_bits().get());
     }
     let meshes: Vec<u32> = handles.iter().map(|h| h.0).collect();
-    Ok(ToolOutput::Json(
-        json!({ "meshes": meshes, "entities": entities }),
-    ))
+    let mut textures: Vec<u32> = textures.values().map(|h| h.0).collect();
+    textures.sort_unstable();
+    Ok(ToolOutput::Json(json!({
+        "meshes": meshes,
+        "textures": textures,
+        "entities": entities,
+    })))
 }
 
 /// Which built-in mesh to create.
@@ -169,8 +229,8 @@ fn mesh_builtin(engine: &mut Headless, args: BuiltinArgs) -> anyhow::Result<Tool
         }
     };
     let source = AssetSource::Builtin(name);
-    let handle = with_assets(engine, |assets, device, registry| {
-        assets.mesh(device, registry, &source)
+    let handle = with_assets(engine, |assets, gpu, state| {
+        assets.mesh(&gpu.device, &mut state.registry, &source)
     })??;
     Ok(ToolOutput::Json(json!({ "handle": handle.0 })))
 }

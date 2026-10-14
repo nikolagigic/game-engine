@@ -101,7 +101,7 @@ impl Game for SpinningCube {
 
         let texture = view.texture();
         let gpu = self.gpu.get_or_insert_with(|| {
-            let renderer = MeshRenderer::new(&ctx.device, texture.format());
+            let renderer = MeshRenderer::new(&ctx.device, &ctx.queue, texture.format());
             renderer.set_light(
                 &ctx.queue,
                 &LightUniform {

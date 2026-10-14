@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::{Entity, Time, World};
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
-use crate::render::{MeshHandle, MeshInstance, RenderState};
+use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers the entity tools, `scene.clear`, and `sim.step`.
@@ -22,13 +22,15 @@ pub fn register_tools(reg: &mut ToolRegistry) {
     reg.register(TypedTool::new(
         "entity.spawn",
         "Spawns an entity that draws a mesh (a handle from mesh.list, mesh.builtin, or \
-         scene.load_gltf) with a transform and a linear RGBA colour. Returns its id.",
+         scene.load_gltf) with a transform, a linear RGBA colour, and optionally a \
+         base-colour texture (a handle from asset.load). Returns its id.",
         entity_spawn,
     ));
     reg.register(TypedTool::new(
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
-         (Euler degrees, XYZ), scale, and mesh and colour if the entity draws one.",
+         (Euler degrees, XYZ), scale, and mesh, colour, and texture (a handle or null) if \
+         the entity draws one.",
         entity_list,
     ));
     reg.register(TypedTool::new(
@@ -71,10 +73,14 @@ struct SpawnArgs {
     scale: Option<[f32; 3]>,
     /// Linear RGBA colour `[r, g, b, a]`; default white.
     color: Option<[f32; 4]>,
+    /// Base-colour texture handle from asset.load (an image source),
+    /// multiplied into `color`; default none (untextured).
+    texture: Option<u32>,
 }
 
 fn entity_spawn(engine: &mut Headless, args: SpawnArgs) -> anyhow::Result<ToolOutput> {
     let mesh = MeshHandle(args.mesh);
+    let texture = args.texture.map(TextureHandle);
     let state = engine
         .resources
         .get::<RenderState>()
@@ -85,6 +91,14 @@ fn entity_spawn(engine: &mut Headless, args: SpawnArgs) -> anyhow::Result<ToolOu
         args.mesh,
         state.registry.len()
     );
+    if let Some(handle) = texture {
+        anyhow::ensure!(
+            state.textures.contains(handle),
+            "unknown texture handle {}; {} textures are uploaded (load one with asset.load)",
+            handle.0,
+            state.textures.len()
+        );
+    }
     let mut transform = Transform::IDENTITY;
     apply_transform(
         &mut transform,
@@ -93,9 +107,14 @@ fn entity_spawn(engine: &mut Headless, args: SpawnArgs) -> anyhow::Result<ToolOu
         args.scale,
     );
     let color = args.color.unwrap_or([1.0; 4]);
-    let entity = engine
-        .world
-        .spawn((transform, MeshInstance { mesh, color }));
+    let entity = engine.world.spawn((
+        transform,
+        MeshInstance {
+            mesh,
+            color,
+            texture,
+        },
+    ));
     Ok(ToolOutput::Json(json!({ "entity": entity_id(entity) })))
 }
 
@@ -123,6 +142,7 @@ fn entity_list(engine: &mut Headless, args: ListArgs) -> anyhow::Result<ToolOutp
             if let Some(instance) = instance {
                 row["mesh"] = json!(instance.mesh.0);
                 row["color"] = json!(instance.color);
+                row["texture"] = json!(instance.texture.map(|t| t.0));
             }
             (entity_id(entity), row)
         })

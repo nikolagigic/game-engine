@@ -38,10 +38,11 @@ fn setup(
     world: &mut World,
     res: &mut Resources,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
     cube: &MeshData,
 ) {
-    let mut state = RenderState::new(device, format);
+    let mut state = RenderState::new(device, queue, format);
     state.light = LightUniform {
         direction: [-0.6, -1.0, -0.4, 0.0],
         color: [1.0, 0.95, 0.85, 1.0],
@@ -60,6 +61,7 @@ fn setup(
         MeshInstance {
             mesh: cube,
             color: [0.18, 0.2, 0.17, 1.0],
+            texture: None,
         },
     ));
 
@@ -73,6 +75,7 @@ fn setup(
         MeshInstance {
             mesh: cube,
             color: [0.8, 0.25, 0.1, 1.0],
+            texture: None,
         },
     ));
 }
@@ -106,7 +109,7 @@ fn main() -> anyhow::Result<()> {
     game.render_fn = Some(Box::new(move |world, res, ctx, color, depth| {
         let texture = color.texture();
         if res.get::<RenderState>().is_none() {
-            setup(world, res, &ctx.device, texture.format(), &cube);
+            setup(world, res, &ctx.device, &ctx.queue, texture.format(), &cube);
         }
         let aspect = texture.width() as f32 / texture.height() as f32;
         render_world(world, res, ctx, color, depth, aspect);
