@@ -10,11 +10,23 @@
 //! The pipeline renders into any colour format (use an sRGB one; the shader
 //! outputs linear colour) with a [`DEPTH_FORMAT`] depth attachment.
 //! [`begin_mesh_pass`] opens a pass with the matching attachments.
+//!
+//! The renderer has one instance buffer per frame: upload every batch back
+//! to back with [`MeshRenderer::upload_instances`], then issue one
+//! [`MeshRenderer::draw`] per batch with its index range.
+//!
+//! ECS integration (GE-008): entities with a [`Transform`] and a
+//! [`MeshInstance`] component are drawn by [`render_world`], which groups
+//! them by [`MeshHandle`] into one instanced draw call per mesh. Meshes live
+//! in the [`MeshRegistry`] inside the [`RenderState`] resource.
+
+use std::ops::Range;
 
 use wgpu::util::DeviceExt as _;
 
 use crate::asset::{MeshData, Vertex};
-use crate::gpu::DEPTH_FORMAT;
+use crate::ecs::{Resources, World};
+use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::math::{Camera, Mat3, Transform};
 
 /// A mesh living in GPU buffers, ready to draw with [`MeshRenderer`].
@@ -311,18 +323,18 @@ impl MeshRenderer {
         self.instance_cap
     }
 
-    /// Draws `mesh` once per instance. Grows the instance buffer if needed.
+    /// Uploads every instance drawn this frame into the single instance
+    /// buffer, growing it (to the next power of two) if needed.
     ///
-    /// Instance data is written with `queue.write_buffer`, which takes
-    /// effect at the next submit. The renderer has one instance buffer, so
-    /// call `draw` at most once per submitted command buffer; a second call
-    /// before submitting overwrites the first call's instances.
-    pub fn draw(
+    /// Call once per frame, before encoding the pass, with all batches
+    /// back to back; then [`Self::draw`] each batch by its index range.
+    /// The data is written with `queue.write_buffer`, which takes effect
+    /// at the next submit, so a second upload before submitting replaces
+    /// the first.
+    pub fn upload_instances(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        pass: &mut wgpu::RenderPass<'_>,
-        mesh: &GpuMesh,
         instances: &[InstanceRaw],
     ) {
         if instances.is_empty() {
@@ -333,13 +345,27 @@ impl MeshRenderer {
             self.instance_buf = create_instance_buffer(device, self.instance_cap);
             log::debug!("instance buffer grown to {} instances", self.instance_cap);
         }
-        let bytes: &[u8] = bytemuck::cast_slice(instances);
-        queue.write_buffer(&self.instance_buf, 0, bytes);
+        queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
+    }
+
+    /// Draws `mesh` once per instance in `instances`, a range of indices
+    /// into the slice last passed to [`Self::upload_instances`]. Several
+    /// draws with disjoint ranges can share one pass.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &GpuMesh, instances: Range<u32>) {
+        if instances.is_empty() {
+            return;
+        }
+        debug_assert!(
+            instances.end as usize <= self.instance_cap,
+            "instance range {instances:?} exceeds the uploaded buffer"
+        );
+        let stride = size_of::<InstanceRaw>() as wgpu::BufferAddress;
+        let bytes = u64::from(instances.start) * stride..u64::from(instances.end) * stride;
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        pass.set_vertex_buffer(1, self.instance_buf.slice(..bytes.len() as u64));
+        pass.set_vertex_buffer(1, self.instance_buf.slice(bytes));
         pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..instances.len() as u32);
     }
@@ -362,6 +388,23 @@ pub fn begin_mesh_pass<'e>(
     depth_view: &wgpu::TextureView,
     clear: wgpu::Color,
 ) -> wgpu::RenderPass<'e> {
+    mesh_pass(
+        encoder,
+        color_view,
+        depth_view,
+        wgpu::LoadOp::Clear(clear),
+        wgpu::LoadOp::Clear(1.0),
+    )
+}
+
+/// A pass with one colour and one depth attachment, both stored.
+fn mesh_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color_view: &wgpu::TextureView,
+    depth_view: &wgpu::TextureView,
+    color_load: wgpu::LoadOp<wgpu::Color>,
+    depth_load: wgpu::LoadOp<f32>,
+) -> wgpu::RenderPass<'e> {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("mesh pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -369,14 +412,14 @@ pub fn begin_mesh_pass<'e>(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(clear),
+                load: color_load,
                 store: wgpu::StoreOp::Store,
             },
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: depth_view,
             depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Clear(1.0),
+                load: depth_load,
                 store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,
@@ -387,10 +430,182 @@ pub fn begin_mesh_pass<'e>(
     })
 }
 
+/// Identifies a mesh uploaded to a [`MeshRegistry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshHandle(pub u32);
+
+/// Component: draw this entity's [`Transform`] with `mesh`, tinted `color`.
+///
+/// [`render_world`] draws every entity that has both a [`Transform`] and a
+/// `MeshInstance`.
+#[derive(Clone, Copy, Debug)]
+pub struct MeshInstance {
+    /// Which mesh to draw.
+    pub mesh: MeshHandle,
+    /// Linear RGBA colour, multiplied into the material base colour.
+    pub color: [f32; 4],
+}
+
+/// GPU meshes addressed by [`MeshHandle`]. Meshes are never removed, so a
+/// handle stays valid for the registry's lifetime.
+#[derive(Default)]
+pub struct MeshRegistry {
+    meshes: Vec<GpuMesh>,
+}
+
+impl MeshRegistry {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Uploads `data` and returns its handle.
+    pub fn add(&mut self, device: &wgpu::Device, data: &MeshData) -> MeshHandle {
+        let handle = MeshHandle(self.meshes.len() as u32);
+        self.meshes.push(GpuMesh::upload(device, data));
+        handle
+    }
+
+    /// The mesh behind `h`.
+    ///
+    /// # Panics
+    ///
+    /// If `h` did not come from this registry.
+    pub fn get(&self, h: MeshHandle) -> &GpuMesh {
+        &self.meshes[h.0 as usize]
+    }
+
+    /// Number of meshes added so far.
+    pub fn len(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// Whether no mesh has been added.
+    pub fn is_empty(&self) -> bool {
+        self.meshes.is_empty()
+    }
+}
+
+/// Resource holding the renderer, the meshes, the light, and the per-mesh
+/// instance scratch space that [`render_world`] refills every frame.
+pub struct RenderState {
+    /// The lit mesh pipeline and its instance buffer.
+    pub renderer: MeshRenderer,
+    /// Meshes that [`MeshInstance::mesh`] handles point into.
+    pub registry: MeshRegistry,
+    /// Light uploaded at the start of every [`render_world`].
+    pub light: LightUniform,
+    /// Number of `draw` calls (one per mesh with at least one instance)
+    /// made by the last [`render_world`].
+    pub last_frame_draw_calls: u32,
+    /// Instances per mesh, indexed by `MeshHandle.0`. Cleared, not freed,
+    /// each frame so the allocations are reused.
+    batches: Vec<Vec<InstanceRaw>>,
+    /// All batches back to back, as uploaded to the instance buffer.
+    instances: Vec<InstanceRaw>,
+}
+
+impl RenderState {
+    /// A renderer for colour targets of `color_format`, with no meshes and
+    /// [`LightUniform::default`].
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self {
+            renderer: MeshRenderer::new(device, color_format),
+            registry: MeshRegistry::new(),
+            light: LightUniform::default(),
+            last_frame_draw_calls: 0,
+            batches: Vec::new(),
+            instances: Vec::new(),
+        }
+    }
+}
+
+/// Draws every entity with a [`Transform`] and a [`MeshInstance`] as seen
+/// by the [`Camera`] resource: one instanced draw call per mesh, all in one
+/// pass.
+///
+/// `color` and `depth` are loaded, not cleared (the game loop and
+/// [`crate::headless::Headless`] clear both before rendering). `aspect` is
+/// the target's width / height. Batches are rebuilt from the world on every
+/// call, so spawned, moved, and despawned entities show up immediately.
+///
+/// Entities whose mesh handle is not in the registry are skipped with a
+/// warning.
+///
+/// # Panics
+///
+/// If the [`RenderState`] or [`Camera`] resource is missing.
+pub fn render_world(
+    world: &mut World,
+    res: &mut Resources,
+    ctx: &GpuContext,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    aspect: f32,
+) {
+    let camera = *res.expect::<Camera>();
+    let state = res.expect_mut::<RenderState>();
+
+    // Group instances by mesh.
+    state
+        .batches
+        .resize_with(state.registry.len(), Vec::new);
+    state.batches.iter_mut().for_each(Vec::clear);
+    let mut unknown = 0;
+    for (transform, instance) in world.query_mut::<(&Transform, &MeshInstance)>() {
+        match state.batches.get_mut(instance.mesh.0 as usize) {
+            Some(batch) => batch.push(InstanceRaw::from_transform(transform, instance.color)),
+            None => unknown += 1,
+        }
+    }
+    if unknown > 0 {
+        log::warn!("skipped {unknown} entities whose mesh is not in the registry");
+    }
+
+    // Lay the batches out back to back, remembering each one's range.
+    state.instances.clear();
+    let mut draws = Vec::new();
+    for (index, batch) in state.batches.iter().enumerate() {
+        if batch.is_empty() {
+            continue;
+        }
+        let start = state.instances.len() as u32;
+        state.instances.extend_from_slice(batch);
+        draws.push((MeshHandle(index as u32), start..state.instances.len() as u32));
+    }
+
+    state.renderer.set_camera(&ctx.queue, &camera, aspect);
+    state.renderer.set_light(&ctx.queue, &state.light);
+    state
+        .renderer
+        .upload_instances(&ctx.device, &ctx.queue, &state.instances);
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_world encoder"),
+        });
+    {
+        let mut pass = mesh_pass(
+            &mut encoder,
+            color,
+            depth,
+            wgpu::LoadOp::Load,
+            wgpu::LoadOp::Load,
+        );
+        for (handle, range) in &draws {
+            let mesh = state.registry.get(*handle);
+            state.renderer.draw(&mut pass, mesh, range.clone());
+        }
+    }
+    ctx.queue.submit([encoder.finish()]);
+    state.last_frame_draw_calls = draws.len() as u32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
+    use crate::gpu::{OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
     use crate::math::{Projection, Quat, Vec3};
 
     #[test]
@@ -440,6 +655,7 @@ mod tests {
                 InstanceRaw::from_transform(&t, [1.0, 0.5, 0.25, 1.0])
             })
             .collect();
+        renderer.upload_instances(&ctx.device, &ctx.queue, &instances);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -450,7 +666,7 @@ mod tests {
                 &target.depth_view,
                 wgpu::Color::BLACK,
             );
-            renderer.draw(&ctx.device, &ctx.queue, &mut pass, mesh, &instances);
+            renderer.draw(&mut pass, mesh, 0..count as u32);
         }
         ctx.queue.submit([encoder.finish()]);
     }
