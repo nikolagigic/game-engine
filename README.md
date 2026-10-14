@@ -43,7 +43,7 @@ cargo check-all   # clippy with warnings denied
 cargo test-all
 ```
 
-Requires Rust 1.91 (pinned in `rust-toolchain.toml`).
+Requires Rust 1.99 (pinned in `rust-toolchain.toml`).
 
 ## Layout
 
