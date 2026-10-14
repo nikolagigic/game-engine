@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
     }
     logger.target(env_logger::Target::Stderr).init();
 
-    let registry = ToolRegistry::with_builtins();
+    let registry = ToolRegistry::with_engine_tools();
     let tools = registry.list();
     let engine = EngineHandle::spawn(registry, options.width, options.height)?;
     log::info!(

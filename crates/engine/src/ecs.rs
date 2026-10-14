@@ -9,12 +9,18 @@
 //!
 //! [`crate::app::EcsGame`] wires a world, resources, and schedule into the
 //! game loop.
+//!
+//! Tools (GE-015): [`register_tools`] adds the `entity.*` tools,
+//! `scene.clear`, and `sim.step`.
+
+mod tools;
 
 use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
 pub use hecs::{Entity, Query, QueryBorrow, With, Without};
+pub use tools::register_tools;
 
 /// The set of entities and their components.
 ///

@@ -19,6 +19,11 @@
 //! [`MeshInstance`] component are drawn by [`render_world`], which groups
 //! them by [`MeshHandle`] into one instanced draw call per mesh. Meshes live
 //! in the [`MeshRegistry`] inside the [`RenderState`] resource.
+//!
+//! Tools (GE-015): [`register_tools`] adds `mesh.list`, `camera.set`,
+//! `light.set`, and `render.frame`.
+
+mod tools;
 
 use std::ops::Range;
 
@@ -29,6 +34,8 @@ use crate::ecs::{Resources, World};
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::math::{Camera, Mat3, Transform};
 
+pub use tools::register_tools;
+
 /// A mesh living in GPU buffers, ready to draw with [`MeshRenderer`].
 pub struct GpuMesh {
     /// [`Vertex`] data (position, normal, uv).
@@ -37,6 +44,10 @@ pub struct GpuMesh {
     pub index_buffer: wgpu::Buffer,
     /// Number of indices in [`Self::index_buffer`].
     pub index_count: u32,
+    /// Number of vertices in [`Self::vertex_buffer`].
+    pub vertex_count: u32,
+    /// Name of the [`MeshData`] this was uploaded from (may be empty).
+    pub name: String,
 }
 
 impl GpuMesh {
@@ -57,6 +68,8 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+            vertex_count: mesh.vertices.len() as u32,
+            name: mesh.name.clone(),
         }
     }
 }
@@ -473,6 +486,19 @@ impl MeshRegistry {
     /// If `h` did not come from this registry.
     pub fn get(&self, h: MeshHandle) -> &GpuMesh {
         &self.meshes[h.0 as usize]
+    }
+
+    /// Every mesh with its handle, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (MeshHandle, &GpuMesh)> {
+        self.meshes
+            .iter()
+            .enumerate()
+            .map(|(i, mesh)| (MeshHandle(i as u32), mesh))
+    }
+
+    /// Whether `h` points at a mesh in this registry.
+    pub fn contains(&self, h: MeshHandle) -> bool {
+        (h.0 as usize) < self.meshes.len()
     }
 
     /// Number of meshes added so far.
