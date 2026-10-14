@@ -119,4 +119,21 @@ render.frame  { "width": 256, "height": 256 }          -> PNG image
 ## Contributing
 
 See `CLAUDE.md` for architecture, conventions, and the definition of done.
-Work is organised as tickets; each PR implements exactly one.
+Work is organised as tickets; each branch implements exactly one and is
+reviewed and merged by the tech lead.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this project by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions. See [AUTHORS.md](AUTHORS.md).
