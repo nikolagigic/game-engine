@@ -73,7 +73,7 @@ explicitly asks for a public type.
 
 ## Conventions
 
-- Edition 2024, Rust 1.91 (pinned in `rust-toolchain.toml`).
+- Edition 2024, Rust 1.99 (pinned in `rust-toolchain.toml`).
 - `cargo fmt` default settings. `cargo clippy -D warnings` must be clean.
 - Errors: `anyhow::Result` at API boundaries and in examples/tests;
   `thiserror` enums inside a module when callers need to match on them.
