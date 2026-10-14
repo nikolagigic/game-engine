@@ -565,41 +565,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "env_logger",
- "glam",
- "gltf",
- "hecs",
- "image",
- "log",
- "pollster",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "engine-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "engine",
- "env_logger",
- "log",
- "rmcp",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2203,6 +2168,41 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "shin-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "env_logger",
+ "glam",
+ "gltf",
+ "hecs",
+ "image",
+ "log",
+ "pollster",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "shin-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "env_logger",
+ "log",
+ "rmcp",
+ "serde_json",
+ "shin-engine",
+ "tokio",
 ]
 
 [[package]]

@@ -1,8 +1,12 @@
-# game-engine
+# Shin Engine
 
-[![CI](https://github.com/nikolagigic/game-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nikolagigic/game-engine/actions/workflows/ci.yml)
+[![CI](https://github.com/nikolagigic/shin-engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nikolagigic/shin-engine/actions/workflows/ci.yml)
 
-A small, readable, open-source 3D game engine written end-to-end in Rust.
+A small, fast, cross-platform 3D engine that humans, scripts, and AI agents
+all drive through the same API.
+
+Shin is open source and written end-to-end in Rust. The crates.io package is
+`shin-engine`; the library is `shin` (`use shin::...`).
 
 The goal is an MVP that proves one architecture, not a feature list:
 
@@ -11,12 +15,12 @@ The goal is an MVP that proves one architecture, not a feature list:
 - **glam** math, **hecs** entity-component-system
 - glTF meshes, instanced rendering, a fixed-timestep game loop
 - Headless golden-image render tests so correctness is checked, not eyeballed
-- An engine-native tool registry exposed over **MCP** (`engine-mcp`), so
+- An engine-native tool registry exposed over **MCP** (`shin-mcp`), so
   agents can build scenes, step the simulation, and look at rendered frames
 
 ## Demo
 
-![The demo scene: a field of coloured cubes and spheres around a white pedestal with orbiting satellites](crates/engine/examples/demo.png)
+![The demo scene: a field of coloured cubes and spheres around a white pedestal with orbiting satellites](crates/shin-engine/examples/demo.png)
 
 ```sh
 cargo run --release --example demo
@@ -44,16 +48,16 @@ Requires Rust 1.91 (pinned in `rust-toolchain.toml`).
 ## Layout
 
 ```
-crates/engine/        the engine library
+crates/shin-engine/   the engine library (package `shin-engine`, lib `shin`)
   src/<subsystem>.rs  one module per subsystem (see src/lib.rs)
   examples/           runnable demos
   tests/              integration + golden-image tests
-crates/engine-mcp/    MCP server (stdio) over the engine's tool registry
+crates/shin-mcp/      MCP server (stdio) over the engine's tool registry
 ```
 
 ## Using the engine from an agent
 
-`engine-mcp` is an [MCP](https://modelcontextprotocol.io) server over stdio.
+`shin-mcp` is an [MCP](https://modelcontextprotocol.io) server over stdio.
 It runs one headless engine (default 512×288 offscreen target) and exposes
 every tool in the engine's tool registry, named `<subsystem>.<verb>`
 (`engine.info`, `engine.list_tools`, ...). New engine tools appear
@@ -62,18 +66,18 @@ automatically.
 Register it with Claude Code from the repo root, either with the CLI:
 
 ```sh
-claude mcp add engine -- cargo run -q -p engine-mcp
+claude mcp add shin -- cargo run -q -p shin-mcp
 ```
 
 or by copying `.mcp.json.example` to `.mcp.json`. Then ask the agent to call
 `engine.info`.
 
-Options: `engine-mcp [--width W] [--height H] [--log-level L]`.
+Options: `shin-mcp [--width W] [--height H] [--log-level L]`.
 `--log-level` takes an `env_logger` filter and overrides `RUST_LOG`. Logs go
 to stderr; stdout carries only JSON-RPC. To try it by hand:
 
 ```sh
-cargo run -q -p engine-mcp <<'EOF'
+cargo run -q -p shin-mcp <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"me","version":"0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"engine.info","arguments":{}}}
@@ -82,7 +86,7 @@ EOF
 
 ### Tools
 
-These are the tools `engine-mcp` currently serves (`ToolRegistry::with_engine_tools`),
+These are the tools `shin-mcp` currently serves (`ToolRegistry::with_engine_tools`),
 one per line with their arguments (`?` = optional). Call `engine.list_tools`
 for the full descriptions and JSON schemas.
 
