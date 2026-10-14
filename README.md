@@ -67,6 +67,41 @@ cargo run -q -p engine-mcp <<'EOF'
 EOF
 ```
 
+### Tools
+
+These are the tools `engine-mcp` currently serves (`ToolRegistry::with_engine_tools`),
+one per line with their arguments (`?` = optional). Call `engine.list_tools`
+for the full descriptions and JSON schemas.
+
+```
+engine.info           {}
+engine.list_tools     {}
+scene.load_gltf       { path }
+mesh.builtin          { kind: "cube" | "sphere", segments?, rings? }
+entity.spawn          { mesh, translation?, rotation_euler_deg?, scale?, color? }
+entity.list           { limit? }
+entity.set_transform  { entity, translation?, rotation_euler_deg?, scale? }
+entity.despawn        { entity }
+scene.clear           {}
+sim.step              { steps? }
+mesh.list             {}
+camera.set            { position?, look_at?, fov_y_deg? }
+light.set             { direction?, color?, ambient? }
+render.frame          { width?, height? }
+```
+
+Vectors are JSON arrays (`[x, y, z]`; colours are linear `[r, g, b, a]`),
+rotations are Euler angles in degrees applied in X, Y, Z order, and entity
+ids are the numbers `entity.spawn` returns. The headless engine starts with
+a camera at `(0, 2, 5)` looking at the origin and a white directional
+light. A minimal session:
+
+```
+mesh.builtin  { "kind": "cube" }                       -> { "handle": 0 }
+entity.spawn  { "mesh": 0, "color": [0.8, 0.1, 0.1, 1] } -> { "entity": 4294967296 }
+render.frame  { "width": 256, "height": 256 }          -> PNG image
+```
+
 ## Contributing
 
 See `CLAUDE.md` for architecture, conventions, and the definition of done.

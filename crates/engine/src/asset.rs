@@ -13,6 +13,11 @@
 //! - indices are widened to `u32`, or generated as `0..n` when absent;
 //! - missing normals are replaced by flat per-triangle normals, which
 //!   duplicates vertices so each triangle owns its three corners.
+//!
+//! Tools (GE-015): [`register_tools`] adds `scene.load_gltf` and
+//! `mesh.builtin`, which upload into the renderer's mesh registry.
+
+mod tools;
 
 use std::f32::consts::PI;
 use std::path::Path;
@@ -21,6 +26,8 @@ use anyhow::Context;
 use glam::{Mat4, Vec3};
 
 use crate::math::Transform;
+
+pub use tools::register_tools;
 
 /// One mesh vertex as the renderer consumes it.
 #[repr(C)]
