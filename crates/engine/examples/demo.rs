@@ -226,40 +226,8 @@ pub fn setup(
     }));
 }
 
-/// Frame-time accumulator behind the window title. (The `stats` module is
-/// still a stub, GE-009, so the demo averages frame times itself.)
-#[derive(Default)]
-struct FrameStats {
-    elapsed: f64,
-    frames: u32,
-    /// The last title, refreshed twice a second.
-    title: String,
-}
-
-/// Frame system: averages `frame_dt` over half a second into
-/// [`FrameStats::title`].
-fn frame_stats_system(world: &mut World, res: &mut Resources) {
-    let frame_dt = res.expect::<Time>().frame_dt;
-    let draw_calls = res
-        .get::<RenderState>()
-        .map_or(0, |state| state.last_frame_draw_calls);
-    let stats = res.expect_mut::<FrameStats>();
-    stats.elapsed += frame_dt;
-    stats.frames += 1;
-    if stats.elapsed < 0.5 {
-        return;
-    }
-    let ms = 1000.0 * stats.elapsed / f64::from(stats.frames);
-    stats.title = format!(
-        "demo | {ms:.2} ms ({:.0} fps) | {} entities, {draw_calls} draw calls | WASD+E/Q, hold right mouse to look",
-        1000.0 / ms,
-        world.len(),
-    );
-    stats.elapsed = 0.0;
-    stats.frames = 0;
-}
-
-/// [`EcsGame`] plus a window title taken from [`FrameStats`].
+/// [`EcsGame`] plus a window title that appends the entity and draw-call
+/// counts to the engine's once-a-second [`engine::stats::FrameStats`] summary.
 struct Demo(EcsGame);
 
 impl Game for Demo {
@@ -290,8 +258,17 @@ impl Game for Demo {
     }
 
     fn title(&self) -> Option<String> {
-        let title = &self.0.resources.get::<FrameStats>()?.title;
-        (!title.is_empty()).then(|| title.clone())
+        // "demo | <FrameStats::summary()>", refreshed once a second.
+        let stats = self.0.title()?;
+        let draw_calls = self
+            .0
+            .resources
+            .get::<RenderState>()
+            .map_or(0, |state| state.last_frame_draw_calls);
+        Some(format!(
+            "{stats} | {} entities, {draw_calls} draw calls | WASD+E/Q, hold right mouse to look",
+            self.0.world.len(),
+        ))
     }
 
     fn cursor_grabbed(&self) -> bool {
@@ -307,10 +284,10 @@ fn main() -> anyhow::Result<()> {
     let mut schedule = Schedule::new();
     schedule
         .add_fixed("orbit", orbit_system)
-        .add_frame("fly_camera", fly_camera_system)
-        .add_frame("frame_stats", frame_stats_system);
+        .add_frame("fly_camera", fly_camera_system);
+    // `EcsGame` records frame times into its `FrameStats` resource itself.
     let mut game = EcsGame::new(World::new(), schedule);
-    game.resources.insert(FrameStats::default());
+    game.title = "demo".to_string();
     let (camera, fly) = initial_camera();
     game.resources.insert(camera);
     game.resources.insert(fly);
