@@ -29,7 +29,7 @@ use std::ops::Range;
 
 use wgpu::util::DeviceExt as _;
 
-use crate::asset::{MeshData, Vertex};
+use crate::asset::{AssetSource, MeshData, Vertex};
 use crate::ecs::{Resources, World};
 use crate::gpu::{DEPTH_FORMAT, GpuContext};
 use crate::math::{Camera, Mat3, Transform};
@@ -461,9 +461,15 @@ pub struct MeshInstance {
 
 /// GPU meshes addressed by [`MeshHandle`]. Meshes are never removed, so a
 /// handle stays valid for the registry's lifetime.
+///
+/// Each entry records the [`AssetSource`] it was loaded from when it came
+/// through [`crate::asset::Assets`]; meshes added with [`Self::add`] have
+/// none.
 #[derive(Default)]
 pub struct MeshRegistry {
     meshes: Vec<GpuMesh>,
+    /// `sources[i]` is where `meshes[i]` came from, if known.
+    sources: Vec<Option<AssetSource>>,
 }
 
 impl MeshRegistry {
@@ -473,9 +479,33 @@ impl MeshRegistry {
     }
 
     /// Uploads `data` and returns its handle.
+    /// The mesh has no [`AssetSource`]; prefer [`crate::asset::Assets::mesh`]
+    /// for anything a scene file may need to refer to.
     pub fn add(&mut self, device: &wgpu::Device, data: &MeshData) -> MeshHandle {
+        self.push(GpuMesh::upload(device, data), None)
+    }
+
+    /// Uploads `data`, records that it was loaded from `source`, and returns
+    /// its handle. Does not deduplicate; [`crate::asset::Assets`] does.
+    pub fn add_with_source(
+        &mut self,
+        device: &wgpu::Device,
+        data: &MeshData,
+        source: AssetSource,
+    ) -> MeshHandle {
+        self.push(GpuMesh::upload(device, data), Some(source))
+    }
+
+    /// Where the mesh behind `h` was loaded from, if it was added with
+    /// [`Self::add_with_source`]. `None` also for unknown handles.
+    pub fn source(&self, h: MeshHandle) -> Option<&AssetSource> {
+        self.sources.get(h.0 as usize)?.as_ref()
+    }
+
+    fn push(&mut self, mesh: GpuMesh, source: Option<AssetSource>) -> MeshHandle {
         let handle = MeshHandle(self.meshes.len() as u32);
-        self.meshes.push(GpuMesh::upload(device, data));
+        self.meshes.push(mesh);
+        self.sources.push(source);
         handle
     }
 

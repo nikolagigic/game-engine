@@ -9,6 +9,7 @@
 use anyhow::Context as _;
 
 use crate::app::RenderFn;
+use crate::asset::Assets;
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OFFSCREEN_COLOR_FORMAT, OffscreenTarget};
 use crate::math::{Camera, Projection, Transform, Vec3};
@@ -46,7 +47,8 @@ impl Headless {
     /// [`frame_stats_system`].
     ///
     /// Resources: default [`Time`] and [`FrameStats`]; a [`RenderState`] with no meshes and
-    /// [`default_light`]; and [`default_camera`]. [`Self::render_fn`]
+    /// [`default_light`]; [`default_camera`]; and an [`Assets`] cache
+    /// rooted at the current working directory. [`Self::render_fn`]
     /// draws the world with [`render_world`], so spawning an entity with a
     /// `Transform` and a `MeshInstance` is enough to see it.
     ///
@@ -67,6 +69,8 @@ impl Headless {
         render_state.light = default_light();
         resources.insert(render_state);
         resources.insert(default_camera());
+        let cwd = std::env::current_dir().context("failed to read the working directory")?;
+        resources.insert(Assets::new(cwd));
         let render_fn: RenderFn = Box::new(|world, res, ctx, color, depth| {
             let size = color.texture().size();
             let aspect = size.width as f32 / size.height as f32;
