@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{LightUniform, RenderState};
+use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Camera, Projection, Vec3};
 use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
@@ -21,18 +22,24 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          \"builtin://cube\" or \"assets/x.gltf#1\", or null for meshes added from code).",
         mesh_list,
     ));
-    reg.register(TypedTool::new(
-        "camera.set",
-        "Moves and aims the camera. Omitted fields keep their current value; setting only \
+    reg.register(
+        TypedTool::new(
+            "camera.set",
+            "Moves and aims the camera. Omitted fields keep their current value; setting only \
          `position` keeps the camera's orientation. Returns the camera.",
-        camera_set,
-    ));
-    reg.register(TypedTool::new(
-        "light.set",
-        "Sets the directional light and ambient term (linear RGB). Omitted fields keep \
+            camera_set,
+        )
+        .with_affected(|_, _| Affected::Camera),
+    );
+    reg.register(
+        TypedTool::new(
+            "light.set",
+            "Sets the directional light and ambient term (linear RGB). Omitted fields keep \
          their current value. Returns the light.",
-        light_set,
-    ));
+            light_set,
+        )
+        .with_affected(|_, _| Affected::Light),
+    );
     reg.register(TypedTool::new(
         "render.frame",
         "Renders one frame of the scene and returns it as a PNG. With `width` and/or \

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Entity, Name, Time, World};
+use crate::command::Affected;
 use crate::headless::Headless;
 use crate::math::{Quat, Transform, Vec3};
 use crate::render::{MeshHandle, MeshInstance, RenderState, TextureHandle};
@@ -19,13 +20,16 @@ use crate::tool::{ToolOutput, ToolRegistry, TypedTool};
 
 /// Registers the entity tools, `scene.clear`, and `sim.step`.
 pub fn register_tools(reg: &mut ToolRegistry) {
-    reg.register(TypedTool::new(
-        "entity.spawn",
-        "Spawns an entity that draws a mesh (a handle from mesh.list, mesh.builtin, or \
+    reg.register(
+        TypedTool::new(
+            "entity.spawn",
+            "Spawns an entity that draws a mesh (a handle from mesh.list, mesh.builtin, or \
          scene.load_gltf) with a transform, a linear RGBA colour, an optional name, and \
          optionally a base-colour texture (a handle from asset.load). Returns its id.",
-        entity_spawn,
-    ));
+            entity_spawn,
+        )
+        .with_affected(|_, _| Affected::Spawned),
+    );
     reg.register(TypedTool::new(
         "entity.list",
         "Lists entities that have a transform, in id order: id, translation, rotation \
@@ -33,23 +37,32 @@ pub fn register_tools(reg: &mut ToolRegistry) {
          (a handle or null) if the entity draws one.",
         entity_list,
     ));
-    reg.register(TypedTool::new(
-        "entity.set_transform",
-        "Changes an entity's translation, rotation (Euler degrees, XYZ), and/or scale. \
+    reg.register(
+        TypedTool::new(
+            "entity.set_transform",
+            "Changes an entity's translation, rotation (Euler degrees, XYZ), and/or scale. \
          Omitted fields keep their value. Returns the new transform.",
-        entity_set_transform,
-    ));
-    reg.register(TypedTool::new(
-        "entity.despawn",
-        "Removes an entity. Fails if no entity has that id.",
-        entity_despawn,
-    ));
-    reg.register(TypedTool::new(
-        "scene.clear",
-        "Despawns every entity. Uploaded meshes, the camera, and the light are kept. \
+            entity_set_transform,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "entity.despawn",
+            "Removes an entity. Fails if no entity has that id.",
+            entity_despawn,
+        )
+        .with_affected(named_entity),
+    );
+    reg.register(
+        TypedTool::new(
+            "scene.clear",
+            "Despawns every entity. Uploaded meshes, the camera, and the light are kept. \
          Returns how many entities were removed.",
-        scene_clear,
-    ));
+            scene_clear,
+        )
+        .with_affected(|_, _| Affected::AllEntities),
+    );
     reg.register(TypedTool::new(
         "sim.step",
         "Runs fixed simulation steps (each `fixed_dt` seconds) and returns the Time \
@@ -246,6 +259,16 @@ fn sim_step(engine: &mut Headless, args: StepArgs) -> anyhow::Result<ToolOutput>
         "frame_dt": time.frame_dt,
         "alpha": time.alpha,
     })))
+}
+
+/// [`Affected`] for tools whose `entity` argument names the one entity
+/// they change. An unknown id names no entity; the call then fails anyway.
+fn named_entity(_: &Headless, args: &Value) -> Affected {
+    let entity = args
+        .get("entity")
+        .and_then(Value::as_u64)
+        .and_then(Entity::from_bits);
+    Affected::Entities(entity.into_iter().collect())
 }
 
 /// The id tools use for `entity`.

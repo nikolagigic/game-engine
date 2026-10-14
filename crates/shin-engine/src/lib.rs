@@ -16,6 +16,7 @@
 //! - [`headless`] — window-less engine handle for tools and tests (GE-013)
 //! - [`project`] — `shin.toml` manifest and new-project scaffolding (GE-018)
 //! - [`scene`]  — `.scene.ron` scene files, `scene.save`/`scene.load` (GE-021)
+//! - [`command`] — undo/redo history over tool calls, `history.*` (GE-022)
 //!
 //! The MCP server lives in the separate `shin-mcp` crate (GE-014) and is
 //! a thin transport over `tool::ToolRegistry` (GE-013). The engine lib never
@@ -25,6 +26,7 @@
 
 pub mod app;
 pub mod asset;
+pub mod command;
 pub mod ecs;
 pub mod gpu;
 pub mod headless;
