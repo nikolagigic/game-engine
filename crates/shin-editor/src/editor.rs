@@ -851,7 +851,11 @@ mod tests {
             &project_dir,
             LogBuffer::default(),
         )?;
-        assert_eq!(entities(&mut core)?.len(), 2, "the entry scene is open");
+        let scene_file = project_dir.join("scenes/main.scene.ron");
+        let starter = std::fs::read_to_string(&scene_file)?;
+        let starter_spheres = starter.matches("builtin://sphere").count();
+        let starter_len = entities(&mut core)?.len();
+        assert!(starter_len >= 2, "the entry scene is open");
         assert!(!core.is_dirty());
         assert!(!core.title().contains('*'));
 
@@ -915,12 +919,18 @@ mod tests {
         let edited = entities(&mut core)?;
         core.try_run(Action::Save)?;
         assert!(!core.is_dirty() && !core.title().contains('*'));
-        let saved = std::fs::read_to_string(project_dir.join("scenes/main.scene.ron"))?;
+        let saved = std::fs::read_to_string(&scene_file)?;
+        assert_eq!(edited.len(), starter_len, "one added, one deleted");
         assert!(saved.contains(r#"name: "ball""#), "{saved}");
         assert!(saved.contains("translation: (2.0, 1.0, -1.0)"), "{saved}");
         assert!(saved.contains("scale: (0.5, 0.5, 0.5)"), "{saved}");
         assert!(saved.contains("color: (0.0, 0.0, 1.0, 1.0)"), "{saved}");
-        assert_eq!(saved.matches("builtin://sphere").count(), 2, "{saved}");
+        // The new ball and the re-meshed cube.
+        assert_eq!(
+            saved.matches("builtin://sphere").count(),
+            starter_spheres + 2,
+            "{saved}"
+        );
         assert!(!saved.contains("ground"), "{saved}");
 
         // An unsaved edit, then reopen: back to what was saved.
