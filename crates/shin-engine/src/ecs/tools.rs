@@ -359,6 +359,51 @@ mod tests {
     }
 
     #[test]
+    fn spawn_takes_a_texture_and_rejects_unknown_ones() -> anyhow::Result<()> {
+        let (reg, mut engine, cube) = setup()?;
+        let err = reg
+            .call(
+                &mut engine,
+                "entity.spawn",
+                json!({ "mesh": cube, "texture": 0 }),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Failed(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("unknown texture handle 0"),
+            "{err}"
+        );
+        assert_eq!(engine.world.len(), 0);
+
+        let state = engine.resources.expect_mut::<RenderState>();
+        let image = crate::asset::ImageData {
+            name: "grey".into(),
+            width: 1,
+            height: 1,
+            rgba: vec![128, 128, 128, 255],
+        };
+        let texture = state
+            .textures
+            .add(&engine.gpu.device, &engine.gpu.queue, &image);
+        call_json(
+            &reg,
+            &mut engine,
+            "entity.spawn",
+            json!({ "mesh": cube, "texture": texture.0 }),
+        )?;
+        call_json(&reg, &mut engine, "entity.spawn", json!({ "mesh": cube }))?;
+        let list = call_json(&reg, &mut engine, "entity.list", json!({}))?;
+        let textures: Vec<&Value> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| &row["texture"])
+            .collect();
+        assert_eq!(textures, [&json!(texture.0), &Value::Null]);
+        Ok(())
+    }
+
+    #[test]
     fn list_respects_limit() -> anyhow::Result<()> {
         let (reg, mut engine, cube) = setup()?;
         for _ in 0..5 {

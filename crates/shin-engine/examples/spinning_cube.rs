@@ -1,7 +1,9 @@
-//! A lit cube spinning around +Y at 1 rad/s. The camera sits at `(0, 2, 5)`
-//! looking at the origin; a white light travels along `(1, -2, -1)`, coming
-//! from above-front-left. Once a second the title shows the frame-time
-//! summary. Press Escape to quit.
+//! A lit cube spinning around +Y at 1 rad/s, textured with the test checker
+//! (`assets/test/checker.png`: red cells in the top half, blue in the
+//! bottom, so each upright face shows red above blue). The camera sits at
+//! `(0, 2, 5)` looking at the origin; a white light travels along
+//! `(1, -2, -1)`, coming from above-front-left. Once a second the title
+//! shows the frame-time summary. Press Escape to quit.
 //!
 //! Run with `cargo run --example spinning_cube` (add `RUST_LOG=wgpu=warn`
 //! to see any wgpu warnings).
@@ -12,10 +14,10 @@
 use std::time::Instant;
 
 use shin::app::{self, AppConfig, Game};
-use shin::asset;
+use shin::asset::{self, ImageData};
 use shin::gpu::GpuContext;
 use shin::math::{Camera, Projection, Quat, Transform, Vec3};
-use shin::render::{GpuMesh, InstanceRaw, LightUniform, MeshRenderer, begin_mesh_pass};
+use shin::render::{GpuMesh, GpuTexture, InstanceRaw, LightUniform, MeshRenderer, begin_mesh_pass};
 use shin::stats::FrameStats;
 
 /// Window title before the first frame-time summary.
@@ -23,8 +25,10 @@ const TITLE: &str = "spinning_cube";
 
 /// Spin speed around +Y, in radians per second.
 const SPIN_SPEED: f64 = 1.0;
-/// Linear RGBA colour of the cube.
-const CUBE_COLOR: [f32; 4] = [0.8, 0.3, 0.2, 1.0];
+/// Linear RGBA colour of the cube, multiplied into the texture.
+const CUBE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// The base-colour texture, relative to this crate.
+const CHECKER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/test/checker.png");
 /// Linear clear colour (near-black).
 const CLEAR: wgpu::Color = wgpu::Color {
     r: 0.02,
@@ -37,10 +41,13 @@ const CLEAR: wgpu::Color = wgpu::Color {
 struct Gpu {
     renderer: MeshRenderer,
     mesh: GpuMesh,
+    texture: GpuTexture,
 }
 
 struct SpinningCube {
     camera: Camera,
+    /// The checker, decoded at startup and uploaded with the renderer.
+    checker: ImageData,
     /// Angle after the previous and the latest fixed step, for interpolation.
     previous_angle: f64,
     angle: f64,
@@ -54,7 +61,7 @@ struct SpinningCube {
 }
 
 impl SpinningCube {
-    fn new() -> Self {
+    fn new(checker: ImageData) -> Self {
         let mut transform = Transform::from_translation(Vec3::new(0.0, 2.0, 5.0));
         transform.looking_at(Vec3::ZERO, Vec3::Y);
         Self {
@@ -66,6 +73,7 @@ impl SpinningCube {
                     far: 100.0,
                 },
             },
+            checker,
             previous_angle: 0.0,
             angle: 0.0,
             gpu: None,
@@ -110,9 +118,11 @@ impl Game for SpinningCube {
                     ambient: [0.1, 0.1, 0.1, 1.0],
                 },
             );
+            let texture = GpuTexture::upload(&ctx.device, &ctx.queue, &renderer, &self.checker);
             Gpu {
                 renderer,
                 mesh: GpuMesh::upload(&ctx.device, &asset::cube()),
+                texture,
             }
         });
 
@@ -132,7 +142,8 @@ impl Game for SpinningCube {
             });
         {
             let mut pass = begin_mesh_pass(&mut encoder, view, depth, CLEAR);
-            gpu.renderer.draw(&mut pass, &gpu.mesh, 0..1);
+            gpu.renderer
+                .draw_textured(&mut pass, &gpu.mesh, &gpu.texture, 0..1);
         }
         ctx.queue.submit([encoder.finish()]);
     }
@@ -149,5 +160,6 @@ fn main() -> anyhow::Result<()> {
         clear_color: CLEAR,
         ..Default::default()
     };
-    app::run(config, SpinningCube::new())
+    let checker = asset::load_image(CHECKER)?;
+    app::run(config, SpinningCube::new(checker))
 }

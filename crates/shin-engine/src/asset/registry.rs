@@ -488,6 +488,104 @@ mod tests {
     }
 
     #[test]
+    fn parse_reads_texture_sources() -> anyhow::Result<()> {
+        let image = |path: &str| AssetSource::Image {
+            path: PathBuf::from(path),
+        };
+        let gltf_image = |path: &str, index| AssetSource::GltfImage {
+            path: PathBuf::from(path),
+            index,
+        };
+        assert_eq!(AssetSource::parse("assets/c.png")?, image("assets/c.png"));
+        assert_eq!(AssetSource::parse("c.JPG")?, image("c.JPG"));
+        assert_eq!(AssetSource::parse("odd#name.jpeg")?, image("odd#name.jpeg"));
+        assert_eq!(
+            AssetSource::parse("assets/x.gltf#image=3")?,
+            gltf_image("assets/x.gltf", 3)
+        );
+        assert_eq!(
+            AssetSource::parse("a#b.glb#image=0")?,
+            gltf_image("a#b.glb", 0)
+        );
+        // Not an image extension: still a mesh.
+        assert_eq!(AssetSource::parse("x.png#1")?, file("x.png", 1));
+        for s in [
+            "assets/c.png",
+            "odd#name.jpeg",
+            "assets/x.gltf#image=3",
+            "a#b.glb#image=0",
+        ] {
+            let source = AssetSource::parse(s)?;
+            assert!(source.is_texture(), "{s}");
+            assert_eq!(source.to_string(), s);
+        }
+        assert!(!AssetSource::parse("builtin://cube")?.is_texture());
+        assert!(!AssetSource::parse("x.gltf#1")?.is_texture());
+        for bad in ["x.gltf#image=", "x.gltf#image=-1", "#image=0"] {
+            assert!(AssetSource::parse(bad).is_err(), "{bad:?} should not parse");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn textures_are_cached_by_source_and_kinds_do_not_mix() -> anyhow::Result<()> {
+        let gpu = GpuContext::new(None)?;
+        let mut state = crate::render::RenderState::new(
+            &gpu.device,
+            &gpu.queue,
+            crate::gpu::OFFSCREEN_COLOR_FORMAT,
+        );
+        let mut assets = Assets::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let png = AssetSource::parse("assets/test/checker.png")?;
+        let embedded = AssetSource::parse("assets/test/textured_cube.gltf#image=0")?;
+        let (device, queue) = (&gpu.device, &gpu.queue);
+
+        let first = assets.texture(device, queue, &mut state.textures, &png)?;
+        assert_eq!(
+            assets.texture(device, queue, &mut state.textures, &png)?,
+            first
+        );
+        let second = assets.texture(device, queue, &mut state.textures, &embedded)?;
+        assert_ne!(first, second);
+        assert_eq!(state.textures.len(), 2);
+        assert_eq!(state.textures.get(second).size(), (64, 64));
+        assert_eq!(state.textures.source(second), Some(&embedded));
+
+        let missing = AssetSource::parse("assets/test/textured_cube.gltf#image=4")?;
+        let err = assets
+            .texture(device, queue, &mut state.textures, &missing)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("out of range"), "{err:#}");
+
+        // A mesh source is not a texture, and a texture source not a mesh.
+        let cube = AssetSource::parse("builtin://cube")?;
+        let err = assets
+            .texture(device, queue, &mut state.textures, &cube)
+            .unwrap_err();
+        assert!(err.to_string().contains("not a texture"), "{err}");
+        let err = assets.mesh(device, &mut state.registry, &png).unwrap_err();
+        assert!(err.to_string().contains("not a mesh"), "{err}");
+        assert!(state.registry.is_empty());
+
+        // Images wgpu would reject fail with an error instead of a panic.
+        let max = gpu.device.limits().max_texture_dimension_2d;
+        for (width, height, bytes) in [(0, 4, 0), (max + 1, 1, 4 * (max as usize + 1)), (2, 2, 4)] {
+            let image = ImageData {
+                name: "bad".into(),
+                width,
+                height,
+                rgba: vec![0; bytes],
+            };
+            let source = AssetSource::parse("bad.png")?;
+            let result =
+                assets.texture_from_data(device, queue, &mut state.textures, &source, &image);
+            assert!(result.is_err(), "{width}x{height} with {bytes} bytes");
+        }
+        assert_eq!(state.textures.len(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn parse_rejects_bad_strings() {
         for s in [
             "",
