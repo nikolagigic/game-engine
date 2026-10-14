@@ -11,6 +11,7 @@ use anyhow::Context as _;
 use crate::app::RenderFn;
 use crate::ecs::{self, Resources, Schedule, Time, World};
 use crate::gpu::{GpuContext, OffscreenTarget};
+use crate::stats::{FrameStats, frame_stats_system};
 
 /// A window-less engine: everything [`crate::app::EcsGame`] has, plus a GPU
 /// context and an offscreen target instead of a window.
@@ -38,8 +39,9 @@ pub struct Headless {
 
 impl Headless {
     /// Creates a GPU context without a surface and a `width` x `height`
-    /// offscreen target, with an empty world and schedule and a default
-    /// [`Time`] resource.
+    /// offscreen target, with an empty world, default [`Time`] and
+    /// [`FrameStats`] resources, and a schedule holding only
+    /// [`frame_stats_system`].
     ///
     /// Fails if no GPU adapter is available or a dimension is zero.
     pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
@@ -51,11 +53,14 @@ impl Headless {
         let target = OffscreenTarget::new(&gpu.device, width, height);
         let mut resources = Resources::new();
         resources.insert(Time::default());
+        resources.insert(FrameStats::default());
+        let mut schedule = Schedule::new();
+        schedule.add_frame("frame_stats", frame_stats_system);
         Ok(Self {
             gpu,
             world: World::new(),
             resources,
-            schedule: Schedule::new(),
+            schedule,
             target,
             fixed_dt: 1.0 / 60.0,
             clear_color: wgpu::Color::BLACK,
