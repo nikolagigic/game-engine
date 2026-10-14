@@ -163,10 +163,195 @@ fn create_depth(
     (texture, view)
 }
 
+/// Colour format of every [`OffscreenTarget`]. sRGB, so shaders and clear
+/// colours are linear and the hardware encodes on write; read-back bytes
+/// are sRGB-encoded RGBA8, ready to save as PNG.
+pub const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// A window-less render target: a colour texture that can be copied back to
+/// the CPU, plus a matching depth texture. Used by golden-image tests and
+/// headless rendering.
+pub struct OffscreenTarget {
+    /// Colour texture in [`OFFSCREEN_COLOR_FORMAT`], usable as a render
+    /// attachment and as a copy source.
+    pub color: wgpu::Texture,
+    /// View of [`Self::color`], used as the colour attachment.
+    pub color_view: wgpu::TextureView,
+    /// Depth texture in [`DEPTH_FORMAT`].
+    pub depth: wgpu::Texture,
+    /// View of [`Self::depth`], used as the depth attachment.
+    pub depth_view: wgpu::TextureView,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl OffscreenTarget {
+    /// Creates a `width` x `height` colour + depth target. Both dimensions
+    /// must be non-zero.
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let (depth, depth_view) = create_depth(device, width, height);
+        Self {
+            color,
+            color_view,
+            depth,
+            depth_view,
+            width,
+            height,
+        }
+    }
+
+    /// Copies the colour texture into a staging buffer, maps it, and returns
+    /// tightly packed RGBA8 pixels (row padding removed).
+    ///
+    /// Blocks until all previously submitted GPU work has finished. The
+    /// bytes are sRGB-encoded, exactly as stored in the texture.
+    pub fn read_pixels(&self, ctx: &GpuContext) -> anyhow::Result<image::RgbaImage> {
+        const BYTES_PER_PIXEL: u32 = 4;
+        let unpadded_row = self.width * BYTES_PER_PIXEL;
+        let padded_row = padded_bytes_per_row(unpadded_row);
+
+        // wgpu requires each copied row to start on a 256-byte boundary, so
+        // the staging buffer is padded per row; we strip it again below.
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen readback"),
+            size: u64::from(padded_row) * u64::from(self.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("offscreen readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            self.color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            self.color.size(),
+        );
+        ctx.queue.submit([encoder.finish()]);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        staging.map_async(wgpu::MapMode::Read, .., move |result| {
+            // The receiver outlives this callback; a send error is impossible.
+            let _ = sender.send(result);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .context("waiting for the GPU to finish the readback copy")?;
+        receiver
+            .recv()
+            .context("readback map callback was dropped")?
+            .context("failed to map the readback buffer")?;
+
+        let mut pixels = Vec::with_capacity((unpadded_row * self.height) as usize);
+        {
+            let mapped = staging
+                .get_mapped_range(..)
+                .context("failed to view the mapped readback buffer")?;
+            for row in mapped.chunks_exact(padded_row as usize) {
+                pixels.extend_from_slice(&row[..unpadded_row as usize]);
+            }
+        }
+        staging.unmap();
+
+        image::RgbaImage::from_raw(self.width, self.height, pixels)
+            .context("readback size does not match the target dimensions")
+    }
+}
+
+/// Rounds `unpadded` up to wgpu's `COPY_BYTES_PER_ROW_ALIGNMENT` (256).
+fn padded_bytes_per_row(unpadded: u32) -> u32 {
+    unpadded.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wgpu::TextureFormat as F;
+
+    #[test]
+    fn rows_are_padded_to_256_bytes() {
+        assert_eq!(padded_bytes_per_row(64 * 4), 256);
+        assert_eq!(padded_bytes_per_row(70 * 4), 512);
+        assert_eq!(padded_bytes_per_row(1), 256);
+        assert_eq!(padded_bytes_per_row(512), 512);
+    }
+
+    /// Clears `target` to a linear colour and submits the pass.
+    fn clear_target(ctx: &GpuContext, target: &OffscreenTarget, color: wgpu::Color) {
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("test clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target.color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(color),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        ctx.queue.submit([encoder.finish()]);
+    }
+
+    /// 70 px * 4 B = 280 B per row, which wgpu pads to 512; the readback
+    /// must strip that padding.
+    #[test]
+    fn read_pixels_handles_unaligned_width() -> anyhow::Result<()> {
+        let ctx = GpuContext::new(None)?;
+        let target = OffscreenTarget::new(&ctx.device, 70, 50);
+        // Linear 0 and 1 encode to exactly 0 and 255 in sRGB.
+        clear_target(
+            &ctx,
+            &target,
+            wgpu::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+
+        let image = target.read_pixels(&ctx)?;
+        assert_eq!(image.dimensions(), (70, 50));
+        let expected = image::Rgba([255, 0, 255, 255]);
+        for (x, y, pixel) in image.enumerate_pixels() {
+            assert_eq!(*pixel, expected, "pixel ({x}, {y})");
+        }
+        Ok(())
+    }
 
     #[test]
     fn prefers_bgra8_srgb() {
