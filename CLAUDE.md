@@ -39,6 +39,13 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 7. **Fixed timestep for simulation, variable for rendering.** Simulation
    ticks at a fixed `dt` (default 1/60 s) with an accumulator; rendering
    runs once per frame with an interpolation alpha available.
+8. **Engine-native tool registry; MCP is one transport.** `engine::tool`
+   holds named, JSON-schema'd operations on a `Headless` engine. The
+   `engine-mcp` crate exposes that registry over stdio with `rmcp`; the
+   engine lib never depends on tokio or rmcp. Every ticket that adds a
+   user-facing capability registers a tool for it (`<subsystem>.<verb>`)
+   in the same PR, with a test through the registry. This is how agents,
+   including you, drive the engine and see rendered frames.
 
 ## Module map
 
@@ -52,6 +59,9 @@ tests. Readability beats cleverness. Small public APIs beat flexible ones.
 | `render` | GPU mesh upload, material, shaders, instanced draw         | GE-006, GE-008 |
 | `input`  | `InputState`, free-fly camera controller                   | GE-007         |
 | `stats`  | frame-time ring buffer and reporting                       | GE-009         |
+| `tool`   | `Tool` trait, `ToolRegistry`, `ToolOutput`                 | GE-013, GE-015 |
+| `headless` | window-less engine handle for tools, tests, benchmarks   | GE-013         |
+| crate `engine-mcp` | stdio MCP server over the registry               | GE-014         |
 
 Public API surface should stay small. Prefer `pub(crate)` until a ticket
 explicitly asks for a public type.
@@ -107,6 +117,8 @@ artifacts.
 - [ ] `cargo fmt --check` passes.
 - [ ] `cargo doc --no-deps` builds without warnings.
 - [ ] New public items have a doc comment.
+- [ ] If the ticket adds a user-facing capability and GE-013 is merged: a
+      tool is registered for it and tested through `ToolRegistry::call`.
 - [ ] PR opened against `main`, description maps AC to evidence.
 
 ## T-shirt sizing (for reference)

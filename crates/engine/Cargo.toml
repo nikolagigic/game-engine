@@ -22,5 +22,8 @@ log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]

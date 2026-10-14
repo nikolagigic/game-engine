@@ -1,0 +1,21 @@
+[package]
+name = "engine-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCP (Model Context Protocol) server exposing the engine's tool registry over stdio."
+
+[[bin]]
+name = "engine-mcp"
+path = "src/main.rs"
+
+[dependencies]
+engine = { path = "../engine" }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
