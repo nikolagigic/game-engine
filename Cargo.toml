@@ -29,6 +29,14 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1.0"
 thiserror = "2.0"
+# Tool registry (engine-native; MCP is one transport over it)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "1.2"
+# MCP server crate only (never in the engine lib)
+rmcp = { version = "3.5", default-features = false, features = ["server", "transport-io", "macros", "schemars"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
+base64 = "0.23"
 
 # Milestone 2 (not yet used; pinned so adding them later is conflict-free)
 rhai = "1.26"
