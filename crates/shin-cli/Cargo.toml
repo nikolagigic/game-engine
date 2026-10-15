@@ -18,6 +18,5 @@ shin-engine = { path = "../shin-engine" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 env_logger = { workspace = true }
-
-[dev-dependencies]
+# Reads tool JSON schemas for `shin docs tools`; also used by the tests.
 serde_json = { workspace = true }
