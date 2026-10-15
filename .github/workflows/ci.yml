@@ -108,3 +108,59 @@ jobs:
           restore-keys: ${{ runner.os }}-docs-
       - name: cargo doc --no-deps
         run: cargo doc --no-deps
+
+  # GE-029: the user guide builds and its generated tools reference is up
+  # to date. mdBook comes from the prebuilt release tarball, not
+  # `cargo install`, so the job takes seconds.
+  guide:
+    name: guide (mdBook + tools reference)
+    runs-on: ubuntu-latest
+    env:
+      MDBOOK_VERSION: v0.5.4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook from the release tarball
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: mdbook build guide
+        run: mdbook build guide
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-guide-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-guide-
+      - name: cargo test -p shin-cli docs
+        run: cargo test -p shin-cli docs
+      - name: Upload the book for GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: guide/book
+
+  # Publishes guide/book to GitHub Pages on every push to main. Only in the
+  # upstream repository (forks have no Pages site for it); enable Pages
+  # once under Settings > Pages > Source: GitHub Actions.
+  deploy-guide:
+    name: deploy guide (GitHub Pages)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'nikolagigic/shin-engine'
+    needs: guide
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

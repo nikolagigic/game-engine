@@ -1,0 +1,19 @@
+[book]
+title = "Shin Engine"
+description = "User guide for Shin, a small, fast, cross-platform 3D engine that humans, scripts, and AI agents all drive through the same API."
+authors = ["Nikola Gigic and game-engine contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/nikolagigic/shin-engine"
+edit-url-template = "https://github.com/nikolagigic/shin-engine/edit/main/guide/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 1

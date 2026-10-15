@@ -18,6 +18,14 @@ The goal is an MVP that proves one architecture, not a feature list:
 - An engine-native tool registry exposed over **MCP** (`shin-mcp`), so
   agents can build scenes, step the simulation, and look at rendered frames
 
+## Documentation
+
+The user guide is at <https://nikolagigic.github.io/shin-engine/>: getting
+started, projects, the editor, scenes, scripting, agents and MCP, and a
+tools reference generated from the engine's tool registry. Its source is
+the mdBook in [`guide/`](guide/); build it locally with `mdbook build
+guide`.
+
 ## Demo
 
 ![The demo scene: a field of coloured cubes and spheres around a white pedestal with orbiting satellites](crates/shin-engine/examples/demo.png)
@@ -133,9 +141,10 @@ EOF
 
 ### Tools
 
-These are the tools `shin-mcp` currently serves (`ToolRegistry::with_engine_tools`),
-one per line with their arguments (`?` = optional). Call `engine.list_tools`
-for the full descriptions and JSON schemas.
+Some of the tools `shin-mcp` serves (`ToolRegistry::with_engine_tools`),
+one per line with their arguments (`?` = optional). The complete, generated
+list is the guide's [tools reference](guide/src/reference/tools.md); call
+`engine.list_tools` for the full descriptions and JSON schemas.
 
 ```
 engine.info           {}

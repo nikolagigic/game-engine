@@ -3,6 +3,7 @@
 //! ```text
 //! shin new <name> [--dir <path>] [--engine-path <path>]
 //! shin edit <dir> [-- <editor args>...]
+//! shin docs tools
 //! ```
 //!
 //! `shin new` creates a runnable game project in `<dir>/<name>` (the
@@ -13,6 +14,11 @@
 //! `shin-editor` binary: the one named by `$SHIN_EDITOR`, else the one next
 //! to `shin`, else the one on `PATH`. Arguments after `--` are passed on
 //! (for example `-- --screenshot out.png`).
+//!
+//! `shin docs tools` prints the user guide's tools reference (GE-029) as
+//! Markdown, generated from the engine's tool registry; see [`docs`].
+
+mod docs;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -54,6 +60,20 @@ enum Command {
         #[arg(last = true)]
         editor_args: Vec<OsString>,
     },
+    /// Print generated documentation for the user guide (`guide/`).
+    Docs {
+        #[command(subcommand)]
+        what: Docs,
+    },
+}
+
+/// What `shin docs` can generate.
+#[derive(Subcommand)]
+enum Docs {
+    /// The tools reference as Markdown: every engine tool with its
+    /// description and arguments. Redirect it to
+    /// `guide/src/reference/tools.md`.
+    Tools,
 }
 
 /// Environment variable that overrides which editor binary `shin edit` runs.
@@ -116,6 +136,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Edit { dir, editor_args } => edit(&dir, &editor_args)?,
+        Command::Docs { what: Docs::Tools } => print!("{}", docs::tools_markdown()),
     }
     Ok(())
 }

@@ -17,3 +17,6 @@
 
 # Golden-test diff output
 /crates/shin-engine/tests/golden/_diff/
+
+# mdBook output (the user guide is built from guide/src)
+/guide/book/
