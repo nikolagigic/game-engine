@@ -122,7 +122,10 @@ builds are incremental.
 2. Work in your own worktree. The branch name is whatever the worktree
    created (`worktree-GE-NNN`) or `GE-NNN-short-slug`; the PR title, not
    the branch, carries the ticket ID.
-3. Implement only what the ticket's **In scope** lists. If something in
+3. Implement only what the ticket's **In scope** lists. The ticket's
+   **Docs** section says which `guide/src/` pages you touch; the public
+   user guide is mdBook under `guide/` (`docs/` is private planning and is
+   not in the repository). If something in
    **Out of scope** turns out to be required, stop and report it; do not
    expand the ticket.
 4. Run the ticket's test command and the full definition of done.
@@ -145,6 +148,11 @@ builds are incremental.
 - [ ] New public items have a doc comment.
 - [ ] If the ticket adds a user-facing capability and GE-013 is merged: a
       tool is registered for it and tested through `ToolRegistry::call`.
+- [ ] If the ticket is user-facing: the relevant `guide/src/` page is
+      updated or added in the same branch, and if any tool changed the
+      tools reference is regenerated
+      (`cargo run -p shin-cli -- docs tools > guide/src/reference/tools.md`).
+      The review request names the pages (or says "none: not user-facing").
 - [ ] Review request sent to the tech lead mapping each AC to evidence.
 
 ## T-shirt sizing (for reference)
